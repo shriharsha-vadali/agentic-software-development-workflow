@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-dev-workflow"
+version = "0.1.0"
+description = "An AI-powered developer assistant that takes a GitHub issue and produces a Pull Request."
+readme = "README.md"
+requires-python = ">=3.11"
+
+dependencies = [
+    # Web framework — async-native, Pydantic-integrated, auto OpenAPI docs
+    "fastapi>=0.115.0",
+    # ASGI server — runs the FastAPI application
+    "uvicorn[standard]>=0.30.0",
+    # Data validation — used for API schemas and structured LLM output
+    "pydantic>=2.7.0",
+    # Reads Pydantic models from environment variables and .env files
+    "pydantic-settings>=2.3.0",
+    # ORM — maps Python classes to SQLite tables
+    "sqlalchemy>=2.0.0",
+    # Async SQLite driver required by SQLAlchemy's async engine
+    "aiosqlite>=0.20.0",
+    # Async HTTP client — used for GitHub API and LLM API calls
+    "httpx>=0.27.0",
+    # Loads .env file into environment variables in development
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Test runner
+    "pytest>=8.2.0",
+    # Enables async def test functions and async fixtures
+    "pytest-asyncio>=0.23.0",
+    # Provides mocker fixture for patching dependencies in tests
+    "pytest-mock>=3.14.0",
+    # Linter and formatter (replaces flake8 + black + isort)
+    "ruff>=0.4.0",
+    # Static type checker
+    "mypy>=1.10.0",
+    # SQLAlchemy type stubs for mypy
+    "sqlalchemy[mypy]>=2.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+# ---------------------------------------------------------------------------
+# Pytest configuration
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+# "auto" mode: every async test function is treated as asyncio without
+# needing the @pytest.mark.asyncio decorator on each one.
+asyncio_mode = "auto"
+# Pin the event loop scope for async fixtures to "function" (one loop per test).
+# Avoids a deprecation warning from pytest-asyncio about unset loop scope.
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+# Show extra test summary info for all outcomes
+addopts = "-ra -q"
+
+# ---------------------------------------------------------------------------
+# Ruff — linter + formatter
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+# E/W = pycodestyle, F = pyflakes, I = isort, UP = pyupgrade
+select = ["E", "W", "F", "I", "UP"]
+ignore = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+# ---------------------------------------------------------------------------
+# Mypy — static type checking
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["sqlalchemy.ext.mypy.plugin"]
+

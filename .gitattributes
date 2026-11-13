@@ -1,0 +1,11 @@
+# Normalise line endings to LF in the repository for all text files.
+# Git will convert to CRLF on checkout on Windows (core.autocrlf=true),
+# but the repository always stores LF — consistent across all platforms.
+* text=auto eol=lf
+
+# Explicitly binary files — never mangle line endings
+*.png binary
+*.jpg binary
+*.whl binary
+*.db  binary
+

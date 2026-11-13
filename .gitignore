@@ -1,0 +1,72 @@
+# =============================================================================
+# Python
+# =============================================================================
+# Compiled bytecode — generated automatically, never committed
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / build artefacts
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.whl
+
+# Virtual environments — the project uses .venv by convention
+.venv/
+venv/
+env/
+ENV/
+
+# =============================================================================
+# Environment & Secrets  ← MOST IMPORTANT SECTION
+# =============================================================================
+# Real .env files contain API keys and tokens — NEVER commit them.
+# Commit only .env.example (the template with placeholder values).
+.env
+.env.local
+.env.*.local
+
+# =============================================================================
+# Application runtime artefacts
+# =============================================================================
+# SQLite database files created at runtime
+*.db
+*.db-shm
+*.db-wal
+
+# Local cloned repositories used as agent workspaces
+workspaces/
+
+# Log files
+*.log
+logs/
+
+# =============================================================================
+# Testing & Coverage
+# =============================================================================
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# =============================================================================
+# Type checking
+# =============================================================================
+.mypy_cache/
+.ruff_cache/
+
+# =============================================================================
+# IDEs & Editors
+# =============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+

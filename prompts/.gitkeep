@@ -1,0 +1,14 @@
+# Prompt templates directory
+#
+# Versioned LLM prompt templates live here.
+# Each prompt is a separate file so it can be:
+#   - Reviewed and edited without touching Python code
+#   - Tested independently with different inputs
+#   - Version-controlled to track how prompt changes affect output
+#
+# Naming convention:
+#   {purpose}_prompt.txt    e.g. plan_prompt.txt, code_gen_prompt.txt
+#
+# Phase 1: plan_prompt.txt (added in Task 7)
+# Phase 2: code_gen_prompt.txt, test_gen_prompt.txt, fix_prompt.txt
+
