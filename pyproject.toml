@@ -18,8 +18,9 @@ dependencies = [
     "pydantic>=2.7.0",
     # Reads Pydantic models from environment variables and .env files
     "pydantic-settings>=2.3.0",
-    # ORM — maps Python classes to SQLite tables
-    "sqlalchemy>=2.0.0",
+    # ORM — maps Python classes to SQLite tables; [asyncio] extra pulls in greenlet
+    # which is required by SQLAlchemy's async extension (sqlalchemy.ext.asyncio)
+    "sqlalchemy[asyncio]>=2.0.0",
     # Async SQLite driver required by SQLAlchemy's async engine
     "aiosqlite>=0.20.0",
     # Async HTTP client — used for GitHub API and LLM API calls
@@ -83,5 +84,4 @@ known-first-party = ["app"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-plugins = ["sqlalchemy.ext.mypy.plugin"]
 
