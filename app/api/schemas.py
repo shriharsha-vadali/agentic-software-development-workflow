@@ -617,6 +617,38 @@ class CreateJobRequest(BaseModel):
         return self
 
 
+class UpdateJobStatusRequest(BaseModel):
+    """
+    Request schema to transition a job's status.
+
+    Sent to `PATCH /jobs/{id}/status` to advance or fail the workflow state machine.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    status: JobStatus = Field(
+        ...,
+        description="Target state machine status to transition to.",
+        examples=[JobStatus.FETCHING_ISSUE],
+    )
+    error_message: str | None = Field(
+        default=None,
+        description=(
+            "Optional error message explaining reason for failure if transitioning to FAILED."
+        ),
+        examples=["GitHub repository not accessible."],
+    )
+
+    @field_validator("error_message")
+    @classmethod
+    def sanitize_error_message(cls, val: str | None) -> str | None:
+        """Strip surrounding whitespace if error_message is provided."""
+        if val is not None:
+            cleaned = val.strip()
+            return cleaned if cleaned else None
+        return None
+
+
 # =============================================================================
 # Job Response Schemas
 # =============================================================================

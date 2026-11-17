@@ -42,6 +42,7 @@ from sqlalchemy import (
     DateTime,
     Enum as SAEnum,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -229,6 +230,18 @@ class Job(Base):
             "Last modification timestamp. "
             "Updated automatically by SQLAlchemy on every flush. "
             "Use this to poll for status changes."
+        ),
+    )
+
+    # --- Constraints & Indexes -----------------------------------------------
+    __table_args__ = (
+        Index(
+            "uq_active_job_per_issue",
+            func.lower(repo_owner),
+            func.lower(repo_name),
+            issue_number,
+            unique=True,
+            sqlite_where=status.not_in([JobStatus.COMPLETED, JobStatus.FAILED]),
         ),
     )
 

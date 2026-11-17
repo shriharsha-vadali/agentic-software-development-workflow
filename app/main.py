@@ -33,6 +33,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.health import router as health_router
+from app.api.jobs import router as jobs_router
 from app.core.config import get_settings
 from app.db.session import dispose_db, init_db
 
@@ -88,6 +89,7 @@ def create_app() -> FastAPI:
 
     # Register API routers
     application.include_router(health_router)
+    application.include_router(jobs_router)
 
     return application
 
