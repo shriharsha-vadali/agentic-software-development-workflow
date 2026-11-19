@@ -28,16 +28,16 @@ import json
 from datetime import datetime
 
 import pytest
-from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db.models import Artifact, Base, Job, JobStatus, Plan
 
-
 # ===========================================================================
 # Shared fixture — fresh in-memory database for every test class
 # ===========================================================================
+
 
 @pytest.fixture()
 def db() -> Session:
@@ -91,6 +91,7 @@ def db() -> Session:
 # Helper: minimal valid Job kwargs (all required, non-nullable columns)
 # ---------------------------------------------------------------------------
 
+
 def make_job(**overrides: object) -> Job:
     """Return a Job instance with sensible defaults, allowing field overrides."""
     defaults: dict[str, object] = {
@@ -108,6 +109,7 @@ def make_job(**overrides: object) -> Job:
 # Tests — JobStatus enum
 # ===========================================================================
 
+
 class TestJobStatus:
     """
     JobStatus is the backbone of the agent state machine.
@@ -117,9 +119,16 @@ class TestJobStatus:
     def test_all_expected_members_exist(self):
         """Every state defined in the Phase 1 plan must be present."""
         expected = {
-            "PENDING", "FETCHING_ISSUE", "INDEXING_CODEBASE",
-            "PLANNING", "AWAITING_APPROVAL", "GENERATING_CODE",
-            "RUNNING_TESTS", "OPENING_PR", "COMPLETED", "FAILED",
+            "PENDING",
+            "FETCHING_ISSUE",
+            "INDEXING_CODEBASE",
+            "PLANNING",
+            "AWAITING_APPROVAL",
+            "GENERATING_CODE",
+            "RUNNING_TESTS",
+            "OPENING_PR",
+            "COMPLETED",
+            "FAILED",
         }
         actual = {m.name for m in JobStatus}
         assert actual == expected
@@ -164,11 +173,13 @@ class TestJobStatus:
 # Tests — model imports and class structure
 # ===========================================================================
 
+
 class TestModelImports:
     """Verify that all public names are importable and of the correct type."""
 
     def test_base_is_declarative_base(self):
         from sqlalchemy.orm import DeclarativeBase
+
         assert issubclass(Base, DeclarativeBase)
 
     def test_job_has_correct_tablename(self):
@@ -189,6 +200,7 @@ class TestModelImports:
 # ===========================================================================
 # Tests — __repr__ methods
 # ===========================================================================
+
 
 class TestModelRepr:
     """__repr__ should produce a readable string without raising exceptions."""
@@ -215,6 +227,7 @@ class TestModelRepr:
 # ===========================================================================
 # Integration tests — Job table
 # ===========================================================================
+
 
 class TestJobTable:
     """
@@ -245,9 +258,7 @@ class TestJobTable:
         db.add(job)
         db.commit()
 
-        row = db.execute(
-            text("SELECT status FROM jobs WHERE id = :id"), {"id": job.id}
-        ).fetchone()
+        row = db.execute(text("SELECT status FROM jobs WHERE id = :id"), {"id": job.id}).fetchone()
         assert row is not None
         assert row[0] == "PENDING"
 
@@ -318,6 +329,7 @@ class TestJobTable:
 # ===========================================================================
 # Integration tests — Plan table
 # ===========================================================================
+
 
 class TestPlanTable:
     def test_create_plan_with_valid_job(self, db: Session):
@@ -434,6 +446,7 @@ class TestPlanTable:
 # Integration tests — Artifact table
 # ===========================================================================
 
+
 class TestArtifactTable:
     def test_create_artifact(self, db: Session):
         """An Artifact linked to an existing Job must be insertable."""
@@ -479,6 +492,7 @@ class TestArtifactTable:
 # ===========================================================================
 # Integration tests — ORM relationships
 # ===========================================================================
+
 
 class TestRelationships:
     """
@@ -540,6 +554,7 @@ class TestRelationships:
 # ===========================================================================
 # Integration tests — cascade delete
 # ===========================================================================
+
 
 class TestCascadeDelete:
     """

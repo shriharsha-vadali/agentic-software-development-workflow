@@ -65,6 +65,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Initializing database tables...")
         await init_db()
 
+        # Recover interrupted jobs on startup (fail-safe if tables not yet created)
+        try:
+            from app.adapters.github import GitHubClient
+            from app.db.session import AsyncSessionLocal
+            from app.orchestrator.workflow import JobOrchestrator
+
+            github_client = GitHubClient(
+                token=settings.github_token,
+                base_url=settings.github_api_base_url,
+            )
+            orchestrator = JobOrchestrator(
+                session_factory=AsyncSessionLocal,
+                github_client=github_client,
+            )
+            recovered = await orchestrator.recover_interrupted_jobs()
+            if recovered:
+                logger.info("Startup recovery processed %d interrupted jobs.", recovered)
+        except Exception as exc:
+            logger.debug("Startup job recovery skipped: %s", exc)
+
         yield
     finally:
         # Shutdown: always attempt database disposal

@@ -140,6 +140,16 @@ class Settings(BaseSettings):
         ),
     )
 
+    github_timeout_seconds: float = Field(
+        default=30.0,
+        gt=0.0,
+        le=300.0,
+        description=(
+            "HTTP request timeout in seconds for GitHub API calls.\n"
+            "Must be a positive float (default: 30.0 seconds)."
+        ),
+    )
+
     # =========================================================================
     # LLM service settings
     # =========================================================================
@@ -292,7 +302,8 @@ class Settings(BaseSettings):
             Properties read like data attributes, which fits the mental model
             of "this is a configuration value" rather than "this is an action".
         """
-        return logging.getLevelName(self.log_level)
+        level = logging.getLevelName(self.log_level)
+        return int(level)
 
     @property
     def is_debug(self) -> bool:
@@ -313,6 +324,7 @@ class Settings(BaseSettings):
 # =============================================================================
 # Singleton accessor
 # =============================================================================
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -346,5 +358,4 @@ def get_settings() -> Settings:
         print(settings.llm_model)
         print(settings.github_token.get_secret_value())  # only place to unwrap
     """
-    return Settings()
-
+    return Settings()  # type: ignore[call-arg]

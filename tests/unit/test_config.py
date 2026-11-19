@@ -51,6 +51,7 @@ a required-field absence:
 # Tests — required fields
 # ===========================================================================
 
+
 class TestRequiredFields:
     """
     Verify that Settings refuses to initialise when required fields are absent.
@@ -65,8 +66,8 @@ class TestRequiredFields:
         GITHUB_TOKEN has no default and no .env fallback → ValidationError.
         The error must name the missing field.
         """
-        monkeypatch.chdir(tmp_path)                       # no .env file here
-        monkeypatch.delenv("GITHUB_TOKEN", raising=False) # clear any shell export
+        monkeypatch.chdir(tmp_path)  # no .env file here
+        monkeypatch.delenv("GITHUB_TOKEN", raising=False)  # clear any shell export
 
         with pytest.raises(ValidationError) as exc_info:
             Settings(llm_api_key="sk-test")
@@ -98,6 +99,7 @@ class TestRequiredFields:
 # Tests — default values
 # ===========================================================================
 
+
 class TestDefaultValues:
     """
     Verify that every field with a default produces the expected value
@@ -116,6 +118,9 @@ class TestDefaultValues:
 
     def test_github_api_base_url_default(self):
         assert self.s.github_api_base_url == "https://api.github.com"
+
+    def test_github_timeout_seconds_default(self):
+        assert self.s.github_timeout_seconds == 30.0
 
     def test_llm_model_defaults_to_gpt4o(self):
         assert self.s.llm_model == "gpt-4o"
@@ -141,6 +146,7 @@ class TestDefaultValues:
 # ===========================================================================
 # Tests — SecretStr fields do not leak sensitive values
 # ===========================================================================
+
 
 class TestSecretFields:
     """
@@ -184,6 +190,7 @@ class TestSecretFields:
 # Tests — field validators
 # ===========================================================================
 
+
 class TestValidators:
     """
     Each validator in Settings has a corresponding test here.
@@ -192,14 +199,17 @@ class TestValidators:
 
     # --- log_level normalisation -------------------------------------------
 
-    @pytest.mark.parametrize("raw,expected", [
-        ("debug",   "DEBUG"),
-        ("DEBUG",   "DEBUG"),
-        ("Debug",   "DEBUG"),
-        ("info",    "INFO"),
-        ("WARNING", "WARNING"),
-        ("error",   "ERROR"),
-    ])
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("debug", "DEBUG"),
+            ("DEBUG", "DEBUG"),
+            ("Debug", "DEBUG"),
+            ("info", "INFO"),
+            ("WARNING", "WARNING"),
+            ("error", "ERROR"),
+        ],
+    )
     def test_log_level_normalised_to_uppercase(self, raw, expected):
         """
         log_level accepts any capitalisation and normalises to uppercase.
@@ -278,10 +288,23 @@ class TestValidators:
         with pytest.raises(ValidationError):
             Settings(**VALID_OVERRIDES, max_retries=11)
 
+    def test_github_timeout_seconds_positive(self):
+        """gt=0 constraint: 0 or negative timeouts are rejected."""
+        with pytest.raises(ValidationError):
+            Settings(**VALID_OVERRIDES, github_timeout_seconds=0.0)
+        with pytest.raises(ValidationError):
+            Settings(**VALID_OVERRIDES, github_timeout_seconds=-5.0)
+
+    def test_github_timeout_seconds_valid_override(self):
+        """Valid float value overrides default."""
+        s = Settings(**VALID_OVERRIDES, github_timeout_seconds=45.5)
+        assert s.github_timeout_seconds == 45.5
+
 
 # ===========================================================================
 # Tests — convenience properties
 # ===========================================================================
+
 
 class TestConvenienceProperties:
     """
@@ -317,6 +340,7 @@ class TestConvenienceProperties:
 # ===========================================================================
 # Tests — get_settings() singleton and cache behaviour
 # ===========================================================================
+
 
 class TestGetSettings:
     """
@@ -373,4 +397,3 @@ class TestGetSettings:
         assert settings_a is not settings_b
 
         get_settings.cache_clear()
-

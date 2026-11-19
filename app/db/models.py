@@ -40,7 +40,6 @@ from typing import Any
 from sqlalchemy import (
     JSON,
     DateTime,
-    Enum as SAEnum,
     ForeignKey,
     Index,
     Integer,
@@ -48,12 +47,15 @@ from sqlalchemy import (
     Text,
     func,
 )
+from sqlalchemy import (
+    Enum as SAEnum,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-
 
 # =============================================================================
 # Declarative base
 # =============================================================================
+
 
 class Base(DeclarativeBase):
     """
@@ -81,7 +83,8 @@ class Base(DeclarativeBase):
 # JobStatus — the agent's state machine
 # =============================================================================
 
-class JobStatus(str, enum.Enum):
+
+class JobStatus(str, enum.Enum):  # noqa: UP042
     """
     All valid states a Job can occupy, in the order they occur.
 
@@ -110,12 +113,12 @@ class JobStatus(str, enum.Enum):
 
     PENDING = "PENDING"
     FETCHING_ISSUE = "FETCHING_ISSUE"
-    INDEXING_CODEBASE = "INDEXING_CODEBASE"   # Phase 2
+    INDEXING_CODEBASE = "INDEXING_CODEBASE"  # Phase 2
     PLANNING = "PLANNING"
     AWAITING_APPROVAL = "AWAITING_APPROVAL"
-    GENERATING_CODE = "GENERATING_CODE"        # Phase 2
-    RUNNING_TESTS = "RUNNING_TESTS"            # Phase 2
-    OPENING_PR = "OPENING_PR"                 # Phase 3
+    GENERATING_CODE = "GENERATING_CODE"  # Phase 2
+    RUNNING_TESTS = "RUNNING_TESTS"  # Phase 2
+    OPENING_PR = "OPENING_PR"  # Phase 3
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
 
@@ -123,6 +126,7 @@ class JobStatus(str, enum.Enum):
 # =============================================================================
 # Job — the top-level record for a single agent run
 # =============================================================================
+
 
 class Job(Base):
     """
@@ -249,7 +253,7 @@ class Job(Base):
     plan: Mapped[Plan | None] = relationship(
         "Plan",
         back_populates="job",
-        uselist=False,          # one-to-one: a job has at most one plan
+        uselist=False,  # one-to-one: a job has at most one plan
         cascade="all, delete-orphan",
     )
     artifacts: Mapped[list[Artifact]] = relationship(
@@ -269,6 +273,7 @@ class Job(Base):
 # =============================================================================
 # Plan — the LLM-generated implementation plan
 # =============================================================================
+
 
 class Plan(Base):
     """
@@ -315,7 +320,7 @@ class Plan(Base):
         Integer,
         ForeignKey("jobs.id", ondelete="CASCADE"),
         nullable=False,
-        unique=True,            # enforces one-to-one at the DB level
+        unique=True,  # enforces one-to-one at the DB level
         comment="The Job this plan belongs to.",
     )
 
@@ -373,6 +378,7 @@ class Plan(Base):
 # =============================================================================
 # Artifact — generic envelope for pipeline outputs
 # =============================================================================
+
 
 class Artifact(Base):
     """
@@ -455,7 +461,4 @@ class Artifact(Base):
     )
 
     def __repr__(self) -> str:
-        return (
-            f"<Artifact id={self.id} job_id={self.job_id} "
-            f"type={self.artifact_type!r}>"
-        )
+        return f"<Artifact id={self.id} job_id={self.job_id} type={self.artifact_type!r}>"

@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.adapters.github import GitHubClient, get_github_client
 from app.api.schemas import (
     ApprovePlanRequest,
     ArtifactResponse,
@@ -27,11 +28,28 @@ from app.api.schemas import (
     UpdateJobStatusRequest,
 )
 from app.db.models import Job, JobStatus
-from app.db.session import get_db
+from app.db.session import AsyncSessionLocal, get_db
+from app.orchestrator.workflow import JobOrchestrator
+from app.services.issue_ingestion import (
+    DuplicateJobError,
+    IssueIngestionService,
+    PullRequestNotAllowedError,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+
+def get_orchestrator(
+    github_client: GitHubClient = Depends(get_github_client),
+) -> JobOrchestrator:
+    """FastAPI dependency for JobOrchestrator."""
+    return JobOrchestrator(
+        session_factory=AsyncSessionLocal,
+        github_client=github_client,
+    )
+
 
 # =============================================================================
 # State Machine Valid Transitions
@@ -69,6 +87,7 @@ def _job_detail_query(job_id: int) -> Select[Job]:
         select(Job)
         .options(selectinload(Job.plan), selectinload(Job.artifacts))
         .where(Job.id == job_id)
+        .execution_options(populate_existing=True)
     )
 
 
@@ -469,3 +488,152 @@ async def approve_plan(
         updated_job.status.value,
     )
     return JobDetailResponse.model_validate(updated_job)
+
+
+@router.post(
+    "/ingest",
+    status_code=status.HTTP_201_CREATED,
+    response_model=JobDetailResponse,
+    summary="Ingest GitHub issue, normalize, and launch autonomous planning",
+)
+async def ingest_job(
+    payload: CreateJobRequest,
+    db: AsyncSession = Depends(get_db),
+    github_client: GitHubClient = Depends(get_github_client),
+    orchestrator: JobOrchestrator = Depends(get_orchestrator),
+) -> JobDetailResponse:
+    """Ingest issue directly from GitHub API and queue background planning."""
+    ingestion_service = IssueIngestionService(github_client)
+    try:
+        job, _ = await ingestion_service.ingest_issue(
+            db=db,
+            owner=payload.repo_owner,
+            repo=payload.repo_name,
+            issue_number=payload.resolved_issue_number,
+        )
+    except DuplicateJobError as err:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(err)) from err
+    except PullRequestNotAllowedError as err:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(err)
+        ) from err
+
+    # Launch background planning phase
+    orchestrator.start_background_planning(job.id)
+
+    res = await db.execute(_job_detail_query(job.id))
+    detail = res.scalars().one()
+    return JobDetailResponse.model_validate(detail)
+
+
+@router.post(
+    "/{job_id}/start",
+    status_code=status.HTTP_200_OK,
+    response_model=JobDetailResponse,
+    summary="Start or resume background planning phase for a job",
+)
+async def start_job(
+    job_id: Annotated[int, Path(gt=0, description="Positive integer job identifier")],
+    db: AsyncSession = Depends(get_db),
+    orchestrator: JobOrchestrator = Depends(get_orchestrator),
+) -> JobDetailResponse:
+    """Trigger the background planning phase for a pending or indexing job."""
+    job = (await db.execute(_job_detail_query(job_id))).scalars().first()
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found."
+        )
+
+    orchestrator.start_background_planning(job.id)
+    return JobDetailResponse.model_validate(job)
+
+
+@router.post(
+    "/{job_id}/execute",
+    status_code=status.HTTP_200_OK,
+    response_model=JobDetailResponse,
+    summary="Trigger execution phase for an approved job",
+)
+async def execute_job(
+    job_id: Annotated[int, Path(gt=0, description="Positive integer job identifier")],
+    db: AsyncSession = Depends(get_db),
+    orchestrator: JobOrchestrator = Depends(get_orchestrator),
+) -> JobDetailResponse:
+    """Trigger background code generation and sandboxed test execution for approved job."""
+    job = (await db.execute(_job_detail_query(job_id))).scalars().first()
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found."
+        )
+
+    if job.status != JobStatus.GENERATING_CODE:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Cannot execute Job {job_id} in status '{job.status.value}'. "
+                "Job must be in 'GENERATING_CODE' (approved)."
+            ),
+        )
+
+    orchestrator.start_background_execution(job.id)
+    return JobDetailResponse.model_validate(job)
+
+
+@router.post(
+    "/{job_id}/approve-pr",
+    status_code=status.HTTP_200_OK,
+    response_model=JobDetailResponse,
+    summary="Authorize and submit GitHub Pull Request for verified job",
+)
+async def approve_pr(
+    job_id: Annotated[int, Path(gt=0, description="Positive integer job identifier")],
+    db: AsyncSession = Depends(get_db),
+    orchestrator: JobOrchestrator = Depends(get_orchestrator),
+) -> JobDetailResponse:
+    """Human authorization checkpoint to commit and open remote Pull Request."""
+    job = (await db.execute(_job_detail_query(job_id))).scalars().first()
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found."
+        )
+
+    if job.status != JobStatus.OPENING_PR:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Cannot approve PR for Job {job_id} in status '{job.status.value}'. "
+                "Job must be in 'OPENING_PR'."
+            ),
+        )
+
+    try:
+        updated = await orchestrator.complete_pull_request(job_id)
+    except Exception as err:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(err)
+        ) from err
+
+    return JobDetailResponse.model_validate(updated)
+
+
+@router.post(
+    "/{job_id}/cancel",
+    status_code=status.HTTP_200_OK,
+    response_model=JobDetailResponse,
+    summary="Cancel an active job",
+)
+async def cancel_job(
+    job_id: Annotated[int, Path(gt=0, description="Positive integer job identifier")],
+    db: AsyncSession = Depends(get_db),
+    orchestrator: JobOrchestrator = Depends(get_orchestrator),
+) -> JobDetailResponse:
+    """Cancel an in-flight job, terminating tasks and marking status as FAILED."""
+    job = (await db.execute(_job_detail_query(job_id))).scalars().first()
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found."
+        )
+
+    cancelled = await orchestrator.cancel_job(job_id)
+    res = await db.execute(_job_detail_query(cancelled.id))
+    return JobDetailResponse.model_validate(res.scalars().one())
