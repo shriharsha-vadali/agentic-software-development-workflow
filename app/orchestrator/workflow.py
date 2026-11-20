@@ -51,18 +51,19 @@ class JobOrchestrator:
         github_client: GitHubClient,
         llm_client: BaseLLMClient | None = None,
         workspace_manager: WorkspaceManager | None = None,
+        runner: SandboxRunner | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.github_client = github_client
         self.llm_client = llm_client or get_llm_client()
         self.workspace_manager = workspace_manager or WorkspaceManager()
+        self.runner = runner or SandboxRunner()
 
         # Component services
         self.indexer = CodebaseIndexer(self.workspace_manager)
         self.context_builder = ContextBuilder()
         self.planning_engine = PlanningEngine(self.llm_client)
         self.code_generator = CodeGenerator(self.llm_client, self.workspace_manager)
-        self.runner = SandboxRunner()
         self.repair_engine = RepairEngine(self.runner, self.code_generator)
         self.git_service = GitWorkspaceService(self.runner)
         self.pr_service = PullRequestService(self.github_client)

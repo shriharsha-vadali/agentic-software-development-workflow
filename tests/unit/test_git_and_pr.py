@@ -7,6 +7,7 @@ Unit tests for GitWorkspaceService and PullRequestService (app/services/).
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -14,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.adapters.github import GitHubClient
 from app.db.models import Base, Job, JobStatus, Plan
-from app.services.git_service import GitWorkspaceService
+from app.services.git_service import GitServiceError, GitWorkspaceService
 from app.services.pr_service import PRAuthorizationError, PullRequestService
 
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
@@ -60,6 +61,58 @@ class TestGitWorkspaceService:
         (ws / "file.txt").write_text("hello world modified\n", encoding="utf-8")
         diff = await service.get_diff(ws)
         assert "+hello world modified" in diff
+
+    async def test_git_operations_bypass_repository_hooks(self, tmp_path: Path) -> None:
+        """Verify that repository-controlled git hooks are never executed."""
+        service = GitWorkspaceService()
+        ws = tmp_path / "job_hook_test"
+        ws.mkdir()
+
+        await service.init_or_verify_repo(ws)
+
+        # Plant a malicious pre-commit hook that creates a canary file or would exit 1
+        hooks_dir = ws / ".git" / "hooks"
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+        canary_file = ws / "MALICIOUS_HOOK_EXECUTED.txt"
+        pre_commit_hook = hooks_dir / "pre-commit"
+        pre_commit_hook.write_text(
+            f"#!/bin/sh\necho 'hacked' > '{canary_file.as_posix()}'\nexit 1\n",
+            encoding="utf-8",
+        )
+
+        # Stage and commit
+        (ws / "safe_file.txt").write_text("secure content\n", encoding="utf-8")
+        sha = await service.stage_and_commit(ws, "feat: commit with hook present")
+
+        # Verify commit succeeded
+        assert len(sha) == 40
+        # Verify hook was NOT executed
+        assert not canary_file.exists(), "Security breach: repository pre-commit hook was executed!"
+
+    def test_git_workspace_service_unique_hooks_directory(self) -> None:
+        """Each GitWorkspaceService instance gets a dedicated unique hooks directory."""
+        service1 = GitWorkspaceService()
+        service2 = GitWorkspaceService()
+
+        assert service1.empty_hooks_dir != service2.empty_hooks_dir
+        assert service1.empty_hooks_dir.exists()
+        assert service2.empty_hooks_dir.exists()
+        assert list(service1.empty_hooks_dir.iterdir()) == []
+        assert list(service2.empty_hooks_dir.iterdir()) == []
+
+        cmd1 = service1._build_git_cmd(["status"])
+        cmd2 = service2._build_git_cmd(["status"])
+
+        assert f"core.hooksPath={service1.empty_hooks_dir.as_posix()}" in cmd1
+        assert f"core.hooksPath={service2.empty_hooks_dir.as_posix()}" in cmd2
+
+    def test_git_workspace_service_mkdtemp_failure(self) -> None:
+        """Failure to create private empty hooks directory fails closed with GitServiceError."""
+        with patch("tempfile.mkdtemp", side_effect=OSError("Read-only filesystem")):
+            with pytest.raises(
+                GitServiceError, match="Failed to create secure empty git hooks directory"
+            ):
+                GitWorkspaceService()
 
 
 class TestPullRequestService:

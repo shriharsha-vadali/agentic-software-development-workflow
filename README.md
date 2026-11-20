@@ -197,21 +197,41 @@ POST /jobs/{id}/cancel
 
 ---
 
-## 6. Security Boundaries & Design
+## 6. Docker Container Isolation & Security Boundaries
 
-1. **Mandatory Human Approval Gate**: Target repository workspace files are NEVER modified before an explicit human approval is received.
-2. **Explicit PR Authorization**: Pull requests are never created or pushed without human authorization.
-3. **Subprocess Sandbox Isolation**:
-   - Commands are strictly checked against a whitelist (`pytest`, `python`, `git`, `ruff`, `mypy`).
-   - Shell string execution (`shell=True`) is prohibited.
-   - Sensitive environment variables (`GITHUB_TOKEN`, `LLM_API_KEY`) are scrubbed before subprocess spawning.
-   - Execution timeouts prevent runaway or malicious loops.
-4. **Path Traversal Protection**: All file modifications are resolved against the job's isolated workspace root; traversal attempts (`../`, absolute paths, `.git/` tampering) raise immediate exceptions.
+### Docker Execution Architecture
+All generated project test suites and analysis tasks run inside disposable Docker containers by default:
+- **Non-Root Execution**: Runs under unprivileged UID/GID (`--user 1000:1000`).
+- **Network Isolation**: Networking is disabled by default (`--network none`) to prevent outbound data exfiltration.
+- **Filesystem Lockdown**: Root filesystem is mounted read-only (`--read-only`) with a strictly sized, non-executable in-memory temporary partition (`--tmpfs /tmp:rw,noexec,nosuid,size=64m`).
+- **Scoped Mounts**: Only the specific job workspace (`workspaces/job_{id}`) is mounted at `/workspace:rw`. The host filesystem is never mounted broadly.
+- **Dropped Capabilities**: All Linux root capabilities are revoked (`--cap-drop ALL`, `--security-opt=no-new-privileges`).
+- **Resource Constraints**: Hard limits on memory (`--memory 512m`), CPU (`--cpus 1.0`), and processes/threads (`--pids-limit 100`).
+- **Timeout Cleanup**: Timed-out containers are forcefully terminated (`docker rm -f <container_name>`).
+- **Credential Scrubbing**: Host credentials (`GITHUB_TOKEN`, `LLM_API_KEY`) are never passed to execution containers.
+
+### Docker Prerequisites & Installation
+1. **Linux**: Install Docker Engine via official packages (`sudo apt-get install docker-ce docker-ce-cli containerd.io`). Ensure the daemon is running (`sudo systemctl start docker`).
+2. **macOS / Windows**: Install [Docker Desktop](https://www.docker.com/products/docker-desktop/) and ensure the Docker daemon is active.
+3. Pre-pull the base execution image:
+   ```bash
+   docker pull python:3.11-slim
+   ```
+
+### Development Without Docker
+If developing in an environment where Docker is unavailable, you can explicitly configure local subprocess execution. The system will **never** silently fall back to host execution:
+```env
+EXECUTION_BACKEND=local_subprocess
+ALLOW_HOST_EXECUTION=true
+```
+
+### Core Security Principles
+1. **Mandatory Human Approval Gate**: Target repository workspace files are NEVER modified before explicit human approval.
+2. **Explicit PR Authorization Gate**: Pull requests are never pushed or created without explicit human authorization.
+3. **Command & Image Validation**: Commands are strictly restricted to whitelisted binaries (`pytest`, `python`, `git`, `ruff`, `mypy`). Container images are validated against strict regex patterns to prevent command injection.
+4. **Path Traversal Protection**: All file modifications are resolved against the job's workspace root; directory traversal attempts (`../`, absolute paths, `.git/` tampering) raise immediate exceptions.
 5. **Untrusted Input Handling**: Issue titles, descriptions, and comments are treated as untrusted data and isolated within sanitized prompt blocks to prevent prompt injection.
 6. **Secret Masking**: Tokens are wrapped in Pydantic's `SecretStr` and excluded from logs, exceptions, and `repr`.
-
-> [!NOTE]
-> Subprocess isolation provides controlled command boundaries for testing. In untrusted multi-tenant production deployments, this should be complemented with containerized Docker or gVisor sandbox runtimes.
 
 ---
 

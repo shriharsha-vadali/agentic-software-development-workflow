@@ -33,6 +33,7 @@ Singleton
 from __future__ import annotations
 
 import logging
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
@@ -224,6 +225,67 @@ class Settings(BaseSettings):
     )
 
     # =========================================================================
+    # Sandboxed execution / Docker isolation settings
+    # =========================================================================
+
+    execution_backend: str = Field(
+        default="docker",
+        description=(
+            "Backend used to execute test and analysis commands.\n"
+            "  'docker'           — executes inside isolated disposable Docker containers.\n"
+            "  'local_subprocess' — executes on the host OS (requires allow_host_execution=True)."
+        ),
+    )
+
+    allow_host_execution: bool = Field(
+        default=False,
+        description=(
+            "Explicit security authorization to permit uncontainerized host OS execution.\n"
+            "MUST be explicitly set to True when using 'local_subprocess' backend.\n"
+            "Prevents silent fallback to host execution when Docker is unavailable."
+        ),
+    )
+
+    docker_image: str = Field(
+        default="python:3.11-slim",
+        description="Docker image used for isolated project execution.",
+    )
+
+    docker_network_disabled: bool = Field(
+        default=True,
+        description="Disable networking in execution containers (--network none).",
+    )
+
+    docker_memory_limit: str = Field(
+        default="512m",
+        description="Memory limit for execution containers (e.g., '512m', '1g').",
+    )
+
+    docker_cpu_limit: float = Field(
+        default=1.0,
+        gt=0.0,
+        le=16.0,
+        description="CPU limit for execution containers (e.g., 1.0 for 1 CPU core).",
+    )
+
+    docker_pids_limit: int = Field(
+        default=100,
+        gt=0,
+        le=1000,
+        description="Process/thread limit for execution containers (--pids-limit).",
+    )
+
+    docker_read_only_rootfs: bool = Field(
+        default=True,
+        description="Mount the container root filesystem as read-only (--read-only).",
+    )
+
+    docker_user: str = Field(
+        default="1000:1000",
+        description="Non-root user UID:GID for container execution (--user).",
+    )
+
+    # =========================================================================
     # Validators — run automatically during model instantiation
     # =========================================================================
 
@@ -260,6 +322,46 @@ class Settings(BaseSettings):
         After:  'https://api.openai.com/v1'
         """
         return str(value).rstrip("/")
+
+    @field_validator("execution_backend", mode="before")
+    @classmethod
+    def normalise_execution_backend(cls, value: object) -> str:
+        """Normalise execution backend and restrict to supported options."""
+        if not isinstance(value, str):
+            raise ValueError("execution_backend must be a string")
+        val = value.strip().lower()
+        if val not in ("docker", "local_subprocess"):
+            raise ValueError(
+                f"Invalid execution_backend '{value}'. Must be 'docker' or 'local_subprocess'."
+            )
+        return val
+
+    @field_validator("docker_image")
+    @classmethod
+    def validate_docker_image_setting(cls, value: str) -> str:
+        """Validate that docker_image contains only safe characters without shell injection."""
+        clean = value.strip()
+        pattern = (
+            r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*(?:/[a-zA-Z0-9][a-zA-Z0-9_.-]*)*(?::[a-zA-Z0-9_.-]+)?$"
+        )
+        if not clean or len(clean) > 255 or not re.match(pattern, clean):
+            raise ValueError(
+                f"Invalid or unsafe docker_image '{value}'. "
+                "Must be alphanumeric with optional repository and tag (e.g. 'python:3.11-slim')."
+            )
+        return clean
+
+    @field_validator("docker_memory_limit")
+    @classmethod
+    def validate_docker_memory_limit(cls, value: str) -> str:
+        """Ensure memory limit conforms to Docker format (e.g. 512m, 1g)."""
+        clean = value.strip().lower()
+        if not re.match(r"^\d+[bkmg]$", clean):
+            raise ValueError(
+                f"Invalid docker_memory_limit '{value}'. "
+                "Must be an integer followed by b, k, m, or g (e.g. '512m')."
+            )
+        return clean
 
     @field_validator("database_url", mode="before")
     @classmethod

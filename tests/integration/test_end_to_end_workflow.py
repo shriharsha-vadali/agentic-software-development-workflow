@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.adapters.github import GitHubClient
 from app.adapters.llm import MockLLMClient
 from app.db.models import Base, JobStatus
+from app.execution.runner import LocalSubprocessBackend, SandboxRunner
 from app.intelligence.workspace import WorkspaceManager
 from app.orchestrator.workflow import JobOrchestrator
 from app.services.approval import UnapprovedPlanExecutionError
@@ -168,11 +169,13 @@ class TestEndToEndWorkflow:
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(github_handler)) as mock_http:
             gh_client = GitHubClient(token="ghp_test", http_client=mock_http)
+            runner = SandboxRunner(backend=LocalSubprocessBackend(allow_host_execution=True))
             orchestrator = JobOrchestrator(
                 session_factory=e2e_session_factory,
                 github_client=gh_client,
                 llm_client=llm_client,
                 workspace_manager=ws_mgr,
+                runner=runner,
             )
 
             # PHASE 1: Issue Ingestion & Job Creation
@@ -268,11 +271,13 @@ class TestEndToEndWorkflow:
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(github_handler)) as mock_http:
             gh_client = GitHubClient(token="ghp_test", http_client=mock_http)
+            runner = SandboxRunner(backend=LocalSubprocessBackend(allow_host_execution=True))
             orchestrator = JobOrchestrator(
                 session_factory=e2e_session_factory,
                 github_client=gh_client,
                 llm_client=llm_client,
                 workspace_manager=ws_mgr,
+                runner=runner,
             )
 
             # Ingest & Plan

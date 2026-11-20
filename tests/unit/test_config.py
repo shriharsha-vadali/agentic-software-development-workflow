@@ -131,6 +131,33 @@ class TestDefaultValues:
     def test_max_retries_defaults_to_3(self):
         assert self.s.max_retries == 3
 
+    def test_execution_backend_defaults_to_docker(self):
+        assert self.s.execution_backend == "docker"
+
+    def test_allow_host_execution_defaults_to_false(self):
+        assert self.s.allow_host_execution is False
+
+    def test_docker_image_defaults_to_python_slim(self):
+        assert self.s.docker_image == "python:3.11-slim"
+
+    def test_docker_network_disabled_defaults_to_true(self):
+        assert self.s.docker_network_disabled is True
+
+    def test_docker_memory_limit_defaults_to_512m(self):
+        assert self.s.docker_memory_limit == "512m"
+
+    def test_docker_cpu_limit_defaults_to_1(self):
+        assert self.s.docker_cpu_limit == 1.0
+
+    def test_docker_pids_limit_defaults_to_100(self):
+        assert self.s.docker_pids_limit == 100
+
+    def test_docker_read_only_rootfs_defaults_to_true(self):
+        assert self.s.docker_read_only_rootfs is True
+
+    def test_docker_user_defaults_to_non_root(self):
+        assert self.s.docker_user == "1000:1000"
+
     def test_workspace_dir_is_path_object(self):
         """
         workspace_dir must be a pathlib.Path, not a plain str.
@@ -299,6 +326,38 @@ class TestValidators:
         """Valid float value overrides default."""
         s = Settings(**VALID_OVERRIDES, github_timeout_seconds=45.5)
         assert s.github_timeout_seconds == 45.5
+
+    def test_execution_backend_normalisation(self):
+        """execution_backend accepts docker and local_subprocess case-insensitively."""
+        s1 = Settings(**VALID_OVERRIDES, execution_backend="DOCKER")
+        assert s1.execution_backend == "docker"
+        s2 = Settings(**VALID_OVERRIDES, execution_backend="Local_Subprocess")
+        assert s2.execution_backend == "local_subprocess"
+
+    def test_execution_backend_invalid_rejected(self):
+        """Unknown execution backend is rejected."""
+        with pytest.raises(ValidationError):
+            Settings(**VALID_OVERRIDES, execution_backend="kubernetes")
+
+    def test_docker_image_valid_overrides(self):
+        """Valid docker image names are accepted."""
+        s = Settings(**VALID_OVERRIDES, docker_image="custom-registry.io/org/repo:3.11-alpine")
+        assert s.docker_image == "custom-registry.io/org/repo:3.11-alpine"
+
+    def test_docker_image_unsafe_rejected(self):
+        """Dangerous or malformed image names are rejected."""
+        with pytest.raises(ValidationError):
+            Settings(**VALID_OVERRIDES, docker_image="python:3.11; rm -rf /")
+
+    def test_docker_memory_limit_valid(self):
+        """Valid memory limits (512m, 1g) are accepted."""
+        s = Settings(**VALID_OVERRIDES, docker_memory_limit="1g")
+        assert s.docker_memory_limit == "1g"
+
+    def test_docker_memory_limit_invalid_rejected(self):
+        """Malformed memory limits are rejected."""
+        with pytest.raises(ValidationError):
+            Settings(**VALID_OVERRIDES, docker_memory_limit="invalid_memory")
 
 
 # ===========================================================================
