@@ -456,3 +456,96 @@ class TestGetSettings:
         assert settings_a is not settings_b
 
         get_settings.cache_clear()
+
+
+# ===========================================================================
+# Tests — API authentication & environment configuration
+# ===========================================================================
+
+
+class TestAuthenticationSettings:
+    """Verify API authentication settings and cross-environment fail-closed validation."""
+
+    def test_default_auth_settings_in_dev(self) -> None:
+        """In default development environment, auth is disabled and api_key is None."""
+        settings = Settings(**VALID_OVERRIDES)
+        assert settings.environment == "development"
+        assert settings.api_auth_enabled is False
+        assert settings.api_key is None
+
+    def test_auth_enabled_with_valid_key(self) -> None:
+        """Enabling auth with a non-empty key succeeds."""
+        settings = Settings(**VALID_OVERRIDES, api_auth_enabled=True, api_key="secret-key-12345")
+        assert settings.api_auth_enabled is True
+        assert settings.api_key is not None
+        assert settings.api_key.get_secret_value() == "secret-key-12345"
+
+    def test_auth_enabled_missing_key_fails_closed(self) -> None:
+        """Enabling auth without configuring an api_key raises ValidationError."""
+        with pytest.raises(ValidationError, match="api_key must be configured"):
+            Settings(**VALID_OVERRIDES, api_auth_enabled=True)
+
+    def test_auth_enabled_empty_or_whitespace_key_fails_closed(self) -> None:
+        """Enabling auth with empty or whitespace key raises ValidationError."""
+        with pytest.raises(ValidationError, match="cannot be empty or whitespace"):
+            Settings(**VALID_OVERRIDES, api_auth_enabled=True, api_key="   ")
+
+    def test_production_environment_requires_auth_enabled(self) -> None:
+        """Setting environment to production with auth disabled raises ValidationError."""
+        with pytest.raises(
+            ValidationError, match="api_auth_enabled must be True when environment is 'production'"
+        ):
+            Settings(**VALID_OVERRIDES, environment="production", api_auth_enabled=False)
+
+    def test_production_environment_missing_key_fails_closed(self) -> None:
+        """Production environment with auth enabled but missing key raises ValidationError."""
+        with pytest.raises(ValidationError, match="api_key must be configured"):
+            Settings(**VALID_OVERRIDES, environment="production", api_auth_enabled=True)
+
+    def test_production_environment_short_key_rejected(self) -> None:
+        """Production environment rejects API keys shorter than 16 characters."""
+        with pytest.raises(ValidationError, match="at least 16 characters"):
+            Settings(
+                **VALID_OVERRIDES,
+                environment="production",
+                api_auth_enabled=True,
+                api_key="short_key_123",
+            )
+
+    def test_production_environment_insecure_placeholder_key_rejected(self) -> None:
+        """Production environment rejects trivial placeholder keys."""
+        with pytest.raises(ValidationError, match="Insecure production api_key detected"):
+            Settings(
+                **VALID_OVERRIDES,
+                environment="production",
+                api_auth_enabled=True,
+                api_key="password",
+            )
+
+    def test_production_environment_valid_configuration(self) -> None:
+        """Production environment succeeds when auth is enabled with strong key."""
+        settings = Settings(
+            **VALID_OVERRIDES,
+            environment="production",
+            api_auth_enabled=True,
+            api_key="prod-ultra-secure-key-998877",
+        )
+        assert settings.environment == "production"
+        assert settings.api_auth_enabled is True
+        assert settings.api_key is not None
+        assert settings.api_key.get_secret_value() == "prod-ultra-secure-key-998877"
+
+    def test_environment_normalised_case_insensitive(self) -> None:
+        """Environment string is normalised to lowercase."""
+        settings = Settings(
+            **VALID_OVERRIDES,
+            environment="PRODUCTION",
+            api_auth_enabled=True,
+            api_key="prod-ultra-secure-key-998877",
+        )
+        assert settings.environment == "production"
+
+    def test_invalid_environment_rejected(self) -> None:
+        """Unrecognised environment name raises ValidationError."""
+        with pytest.raises(ValidationError, match="Invalid environment"):
+            Settings(**VALID_OVERRIDES, environment="invalid_staging_env")

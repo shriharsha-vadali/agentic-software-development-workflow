@@ -27,6 +27,7 @@ from app.api.schemas import (
     PlanResponse,
     UpdateJobStatusRequest,
 )
+from app.core.auth import get_current_api_key
 from app.db.models import Job, JobStatus
 from app.db.session import AsyncSessionLocal, get_db
 from app.orchestrator.workflow import JobOrchestrator
@@ -38,7 +39,11 @@ from app.services.issue_ingestion import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/jobs", tags=["jobs"])
+router = APIRouter(
+    prefix="/jobs",
+    tags=["jobs"],
+    dependencies=[Depends(get_current_api_key)],
+)
 
 
 def get_orchestrator(

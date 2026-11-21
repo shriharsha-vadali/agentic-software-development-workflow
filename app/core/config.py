@@ -38,7 +38,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ---------------------------------------------------------------------------
@@ -286,6 +286,38 @@ class Settings(BaseSettings):
     )
 
     # =========================================================================
+    # Environment & API Authentication settings
+    # =========================================================================
+
+    environment: str = Field(
+        default="development",
+        description=(
+            "Application deployment environment: "
+            "'development', 'staging', 'production', or 'test'.\n"
+            "In 'production', api_auth_enabled is strictly required and enforced."
+        ),
+    )
+
+    api_auth_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable API key authentication for protected API endpoints.\n"
+            "When False (default for dev/tests), requests are permitted without authentication.\n"
+            "When True, requests must supply a valid API key via 'X-API-Key' or Bearer token.\n"
+            "Must be True when environment is 'production'."
+        ),
+    )
+
+    api_key: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Secret API key required for client authentication when api_auth_enabled is True.\n"
+            "Must be supplied via environment variable API_KEY.\n"
+            "Stored as SecretStr: never printed or logged."
+        ),
+    )
+
+    # =========================================================================
     # Validators — run automatically during model instantiation
     # =========================================================================
 
@@ -386,6 +418,61 @@ class Settings(BaseSettings):
                 f"  Example:  sqlite+aiosqlite:///./jobs.db"
             )
         return url
+
+    @field_validator("environment", mode="before")
+    @classmethod
+    def normalise_environment(cls, value: object) -> str:
+        """Normalise environment to lowercase and restrict to valid options."""
+        if not isinstance(value, str):
+            raise ValueError("environment must be a string")
+        clean = value.strip().lower()
+        allowed = ("development", "staging", "production", "test")
+        if clean not in allowed:
+            raise ValueError(
+                f"Invalid environment '{value}'. Must be one of: {', '.join(allowed)}."
+            )
+        return clean
+
+    @model_validator(mode="after")
+    def validate_auth_configuration(self) -> Settings:
+        """
+        Enforce fail-closed API authentication rules across environments.
+        """
+        env = self.environment.lower()
+        if env == "production":
+            if not self.api_auth_enabled:
+                raise ValueError("api_auth_enabled must be True when environment is 'production'.")
+
+        if self.api_auth_enabled:
+            if self.api_key is None:
+                raise ValueError("api_key must be configured when api_auth_enabled is True.")
+            raw_key = self.api_key.get_secret_value().strip()
+            if not raw_key:
+                raise ValueError(
+                    "api_key cannot be empty or whitespace when api_auth_enabled is True."
+                )
+            if env == "production":
+                insecure_keys = {
+                    "secret",
+                    "password",
+                    "changeme",
+                    "default",
+                    "12345678",
+                    "test",
+                    "admin",
+                    "api_key",
+                }
+                if raw_key.lower() in insecure_keys or any(
+                    raw_key.lower().startswith(p) for p in ("changeme", "password", "default")
+                ):
+                    raise ValueError(
+                        f"Insecure production api_key detected: '{raw_key}' is not permitted."
+                    )
+                if len(raw_key) < 16:
+                    raise ValueError(
+                        "api_key must be at least 16 characters in production environments."
+                    )
+        return self
 
     # =========================================================================
     # Convenience properties

@@ -6,4 +6,5 @@
 #
 # Modules:
 #   config.py  — Pydantic Settings: load, validate and expose all env vars
+#   auth.py    — API authentication, constant-time comparison and FastAPI security dependencies
 
