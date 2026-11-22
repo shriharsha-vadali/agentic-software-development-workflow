@@ -30,11 +30,25 @@ from app.api.schemas import (
 from app.core.auth import get_current_api_key
 from app.db.models import Job, JobStatus
 from app.db.session import AsyncSessionLocal, get_db
+from app.orchestrator.state_machine import (
+    InvalidTransitionError,
+    JobStateMachine,
+)
 from app.orchestrator.workflow import JobOrchestrator
+from app.services.approval import (
+    InvalidJobStateForApprovalError,
+    MissingPlanError,
+    PlanApprovalService,
+)
 from app.services.issue_ingestion import (
     DuplicateJobError,
     IssueIngestionService,
     PullRequestNotAllowedError,
+)
+from app.services.pr_service import PRAuthorizationError
+from app.services.workflow_auth import (
+    WorkflowAuthorizationError,
+    WorkflowAuthorizationPolicy,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,36 +68,6 @@ def get_orchestrator(
         session_factory=AsyncSessionLocal,
         github_client=github_client,
     )
-
-
-# =============================================================================
-# State Machine Valid Transitions
-# =============================================================================
-
-VALID_JOB_TRANSITIONS: dict[JobStatus, set[JobStatus]] = {
-    JobStatus.PENDING: {JobStatus.FETCHING_ISSUE, JobStatus.FAILED},
-    JobStatus.FETCHING_ISSUE: {
-        JobStatus.INDEXING_CODEBASE,
-        JobStatus.PLANNING,
-        JobStatus.FAILED,
-    },
-    JobStatus.INDEXING_CODEBASE: {JobStatus.PLANNING, JobStatus.FAILED},
-    JobStatus.PLANNING: {JobStatus.AWAITING_APPROVAL, JobStatus.FAILED},
-    JobStatus.AWAITING_APPROVAL: {
-        JobStatus.GENERATING_CODE,
-        JobStatus.PLANNING,
-        JobStatus.FAILED,
-    },
-    JobStatus.GENERATING_CODE: {JobStatus.RUNNING_TESTS, JobStatus.FAILED},
-    JobStatus.RUNNING_TESTS: {
-        JobStatus.OPENING_PR,
-        JobStatus.GENERATING_CODE,
-        JobStatus.FAILED,
-    },
-    JobStatus.OPENING_PR: {JobStatus.COMPLETED, JobStatus.FAILED},
-    JobStatus.COMPLETED: set(),  # Terminal state
-    JobStatus.FAILED: set(),  # Terminal state
-}
 
 
 def _job_detail_query(job_id: int) -> Select[Job]:
@@ -271,7 +255,7 @@ async def get_job(
     summary="Update job status with state machine transition validation",
     description=(
         "Transitions the job status. Validates that the requested transition "
-        "is permitted by the agent state machine."
+        "is permitted by the agent state machine and workflow authorization policies."
     ),
     responses={
         status.HTTP_200_OK: {
@@ -303,28 +287,25 @@ async def update_job_status(
             detail=f"Job with id {job_id} not found.",
         )
 
-    allowed_transitions = VALID_JOB_TRANSITIONS.get(job.status, set())
-    if payload.status not in allowed_transitions:
+    try:
+        JobStateMachine.transition(
+            job,
+            payload.status,
+            payload.error_message,
+            is_external=True,
+        )
+    except (InvalidTransitionError, WorkflowAuthorizationError) as exc:
         logger.warning(
-            "Invalid transition requested for job #%s: %s -> %s",
+            "Invalid transition requested for job #%s: %s -> %s: %s",
             job_id,
             job.status.value,
             payload.status.value,
+            exc,
         )
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"Invalid state transition from '{job.status.value}' to '{payload.status.value}'."
-            ),
-        )
-
-    job.status = payload.status
-    if payload.status == JobStatus.FAILED:
-        if payload.error_message is not None:
-            job.error_message = payload.error_message
-    else:
-        # Clear stale error messages when transitioning to a non-FAILED state
-        job.error_message = None
+            detail=str(exc),
+        ) from exc
 
     try:
         await db.commit()
@@ -434,7 +415,11 @@ async def get_job_artifacts(
         },
         status.HTTP_409_CONFLICT: {
             "model": ErrorResponse,
-            "description": "Job is not in AWAITING_APPROVAL state.",
+            "description": "Job is not in AWAITING_APPROVAL state or already reviewed.",
+        },
+        status.HTTP_422_UNPROCESSABLE_ENTITY: {
+            "model": ErrorResponse,
+            "description": "Validation error on approval decision or missing feedback.",
         },
     },
 )
@@ -444,54 +429,36 @@ async def approve_plan(
     db: AsyncSession = Depends(get_db),
 ) -> JobDetailResponse:
     """Approve or reject the plan for a job in AWAITING_APPROVAL state."""
-    result = await db.execute(_job_detail_query(job_id))
-    job = result.scalars().first()
-
+    job = (await db.execute(_job_detail_query(job_id))).scalars().first()
     if job is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Job with id {job_id} not found.",
         )
 
-    if job.status != JobStatus.AWAITING_APPROVAL:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"Cannot review plan for job in '{job.status.value}' state. "
-                "Job must be in 'AWAITING_APPROVAL'."
-            ),
+    try:
+        updated_job = await PlanApprovalService.review_plan(
+            db=db,
+            job_id=job_id,
+            decision=payload.decision,
+            feedback=payload.feedback,
         )
-
-    if job.plan is None:
+    except MissingPlanError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No plan found for job {job_id}.",
-        )
+            detail=str(exc),
+        ) from exc
+    except (InvalidJobStateForApprovalError, WorkflowAuthorizationError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
 
-    if payload.decision == "approved":
-        job.plan.status = "approved"
-        job.status = JobStatus.GENERATING_CODE
-        job.error_message = None
-    elif payload.decision == "rejected":
-        job.plan.status = "rejected"
-        job.plan.human_feedback = payload.feedback
-        job.status = JobStatus.PLANNING
-        job.error_message = None
-
-    try:
-        await db.commit()
-    except Exception:
-        await db.rollback()
-        raise
-
-    res = await db.execute(_job_detail_query(job.id))
-    updated_job = res.scalars().one()
-    logger.info(
-        "Job #%s plan %s; transitioned to %s",
-        job_id,
-        payload.decision,
-        updated_job.status.value,
-    )
     return JobDetailResponse.model_validate(updated_job)
 
 
@@ -549,6 +516,14 @@ async def start_job(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found."
         )
 
+    try:
+        WorkflowAuthorizationPolicy.authorize_start_planning(job)
+    except WorkflowAuthorizationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
     orchestrator.start_background_planning(job.id)
     return JobDetailResponse.model_validate(job)
 
@@ -571,14 +546,13 @@ async def execute_job(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found."
         )
 
-    if job.status != JobStatus.GENERATING_CODE:
+    try:
+        WorkflowAuthorizationPolicy.authorize_execution(job)
+    except WorkflowAuthorizationError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"Cannot execute Job {job_id} in status '{job.status.value}'. "
-                "Job must be in 'GENERATING_CODE' (approved)."
-            ),
-        )
+            detail=str(exc),
+        ) from exc
 
     orchestrator.start_background_execution(job.id)
     return JobDetailResponse.model_validate(job)
@@ -602,23 +576,25 @@ async def approve_pr(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found."
         )
 
-    if job.status != JobStatus.OPENING_PR:
+    try:
+        WorkflowAuthorizationPolicy.authorize_pr_creation(job)
+    except (PRAuthorizationError, WorkflowAuthorizationError) as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"Cannot approve PR for Job {job_id} in status '{job.status.value}'. "
-                "Job must be in 'OPENING_PR'."
-            ),
-        )
+            detail=str(exc),
+        ) from exc
 
     try:
         updated = await orchestrator.complete_pull_request(job_id)
+    except (PRAuthorizationError, WorkflowAuthorizationError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except Exception as err:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(err)
         ) from err
 
-    return JobDetailResponse.model_validate(updated)
+    res = await db.execute(_job_detail_query(updated.id))
+    return JobDetailResponse.model_validate(res.scalars().one())
 
 
 @router.post(
@@ -638,6 +614,14 @@ async def cancel_job(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=f"Job {job_id} not found."
         )
+
+    try:
+        WorkflowAuthorizationPolicy.authorize_cancellation(job)
+    except WorkflowAuthorizationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
 
     cancelled = await orchestrator.cancel_job(job_id)
     res = await db.execute(_job_detail_query(cancelled.id))

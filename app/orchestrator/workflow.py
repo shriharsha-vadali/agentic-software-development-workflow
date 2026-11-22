@@ -38,6 +38,7 @@ from app.services.approval import PlanApprovalService
 from app.services.git_service import GitWorkspaceService
 from app.services.issue_ingestion import NormalizedIssueData
 from app.services.pr_service import PullRequestService
+from app.services.workflow_auth import WorkflowAuthorizationPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,10 @@ class JobOrchestrator:
         """
         async with self.session_factory() as db:
             job = await self._get_job(db, job_id)
+
+            # Authorization gate: Validate job can start or resume planning
+            WorkflowAuthorizationPolicy.authorize_start_planning(job)
+
             try:
                 # 1. Fetching Issue
                 if job.status == JobStatus.PENDING:
@@ -281,12 +286,13 @@ class JobOrchestrator:
                     await db.commit()
                     return job
 
+                # Refresh job state and artifacts after test-repair loop
+                job = await self._get_job(db, job_id)
+
                 # 4. Tests passed -> Transition to OPENING_PR (awaiting PR authorization)
                 JobStateMachine.transition(job, JobStatus.OPENING_PR)
                 await db.commit()
 
-                # Reload job with fresh artifacts
-                job = await self._get_job(db, job_id)
                 logger.info("Job %d completed execution and is now in %s", job.id, job.status.value)
                 return job
 
@@ -308,11 +314,8 @@ class JobOrchestrator:
         async with self.session_factory() as db:
             job = await self._get_job(db, job_id)
 
-            if job.status != JobStatus.OPENING_PR:
-                raise ValueError(
-                    f"Cannot complete PR for Job {job_id} with status '{job.status.value}'. "
-                    "Must be in 'OPENING_PR'."
-                )
+            # Security assertion: PR authorization checkpoint
+            WorkflowAuthorizationPolicy.authorize_pr_creation(job)
 
             ws_path = Path(job.workspace_path or self.workspace_manager.get_job_workspace(job.id))
             feature_branch = f"agent/issue-{job.issue_number}-{job.id}"
@@ -368,20 +371,23 @@ class JobOrchestrator:
 
     async def cancel_job(self, job_id: int) -> Job:
         """Cancel an in-flight job and transition to FAILED."""
-        # Cancel running task if active
-        task = self._active_tasks.pop(job_id, None)
-        if task and not task.done():
-            task.cancel()
-            logger.info("Cancelled running background task for Job %d", job_id)
-
         async with self.session_factory() as db:
             job = await self._get_job(db, job_id)
-            if job.status not in (JobStatus.COMPLETED, JobStatus.FAILED):
-                JobStateMachine.transition(
-                    job, JobStatus.FAILED, error_message="Job cancelled by user."
-                )
-                await db.commit()
-                await db.refresh(job)
+
+            # Security assertion: Terminal jobs cannot be cancelled
+            WorkflowAuthorizationPolicy.authorize_cancellation(job)
+
+            # Cancel running task if active
+            task = self._active_tasks.pop(job_id, None)
+            if task and not task.done():
+                task.cancel()
+                logger.info("Cancelled running background task for Job %d", job_id)
+
+            JobStateMachine.transition(
+                job, JobStatus.FAILED, error_message="Job cancelled by user."
+            )
+            await db.commit()
+            await db.refresh(job)
             return job
 
     async def recover_interrupted_jobs(self) -> int:

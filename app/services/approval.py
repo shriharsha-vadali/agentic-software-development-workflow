@@ -16,23 +16,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db.models import Job, JobStatus
+from app.orchestrator.state_machine import JobStateMachine
+from app.services.workflow_auth import (
+    DuplicateActionError,
+    PlanApprovalRequiredError,
+    UnauthorizedActionError,
+    WorkflowAuthorizationError,
+    WorkflowAuthorizationPolicy,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class ApprovalGateError(Exception):
+class ApprovalGateError(WorkflowAuthorizationError):
     """Base exception for approval gate violations."""
 
 
-class InvalidJobStateForApprovalError(ApprovalGateError):
+class InvalidJobStateForApprovalError(ApprovalGateError, UnauthorizedActionError):
     """Raised when an approval is attempted on a job not in AWAITING_APPROVAL."""
 
 
-class MissingPlanError(ApprovalGateError):
+class MissingPlanError(ApprovalGateError, PlanApprovalRequiredError):
     """Raised when no plan exists for the job being approved."""
 
 
-class UnapprovedPlanExecutionError(ApprovalGateError):
+class UnapprovedPlanExecutionError(ApprovalGateError, PlanApprovalRequiredError):
     """Raised when code generation is attempted without an approved plan."""
 
 
@@ -76,27 +84,25 @@ class PlanApprovalService:
         if job is None:
             raise ValueError(f"Job with id {job_id} not found.")
 
-        if job.status != JobStatus.AWAITING_APPROVAL:
-            raise InvalidJobStateForApprovalError(
-                f"Cannot review plan for Job {job_id} in state '{job.status.value}'. "
-                "Job must be in 'AWAITING_APPROVAL'."
-            )
+        try:
+            WorkflowAuthorizationPolicy.authorize_plan_review(job, decision, feedback)
+        except UnauthorizedActionError as exc:
+            raise InvalidJobStateForApprovalError(str(exc)) from exc
+        except DuplicateActionError as exc:
+            raise InvalidJobStateForApprovalError(str(exc)) from exc
+        except PlanApprovalRequiredError as exc:
+            raise MissingPlanError(str(exc)) from exc
 
-        if job.plan is None:
-            raise MissingPlanError(f"No plan found for Job {job_id}.")
+        assert job.plan is not None
 
         if decision == "approved":
             job.plan.status = "approved"
-            job.status = JobStatus.GENERATING_CODE
-            job.error_message = None
+            JobStateMachine.transition(job, JobStatus.GENERATING_CODE)
             logger.info("Human APPROVED plan for Job %d -> transitioned to GENERATING_CODE", job_id)
         elif decision == "rejected":
-            if not feedback:
-                raise ValueError("Feedback is required when rejecting an implementation plan.")
             job.plan.status = "rejected"
             job.plan.human_feedback = feedback
-            job.status = JobStatus.PLANNING
-            job.error_message = None
+            JobStateMachine.transition(job, JobStatus.PLANNING)
             logger.info(
                 "Human REJECTED plan for Job %d -> transitioned to PLANNING for revision", job_id
             )
@@ -123,13 +129,7 @@ class PlanApprovalService:
         Verify that a job and its plan are strictly approved before code generation.
         Raises UnapprovedPlanExecutionError if any condition is not met.
         """
-        if job.status != JobStatus.GENERATING_CODE:
-            raise UnapprovedPlanExecutionError(
-                f"Security violation: Cannot execute code generation on Job {job.id} "
-                f"with status '{job.status.value}'. Status must be 'GENERATING_CODE'."
-            )
-        if job.plan is None or job.plan.status != "approved":
-            raise UnapprovedPlanExecutionError(
-                f"Security violation: Job {job.id} does not have an approved plan. "
-                "Modifying target repository files without approval is strictly prohibited."
-            )
+        try:
+            WorkflowAuthorizationPolicy.authorize_execution(job)
+        except WorkflowAuthorizationError as exc:
+            raise UnapprovedPlanExecutionError(f"Security violation: {exc}") from exc

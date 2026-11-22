@@ -16,6 +16,15 @@ from sqlalchemy.orm import selectinload
 
 from app.adapters.github import GitHubClient, GitHubPullRequest
 from app.db.models import Artifact, Job, JobStatus
+from app.orchestrator.state_machine import JobStateMachine
+from app.services.workflow_auth import (
+    DuplicateActionError,
+    PlanApprovalRequiredError,
+    PRAuthorizationRequiredError,
+    UnauthorizedActionError,
+    WorkflowAuthorizationError,
+    WorkflowAuthorizationPolicy,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +33,7 @@ class PRServiceError(Exception):
     """Base exception for PR creation failures."""
 
 
-class PRAuthorizationError(PRServiceError):
+class PRAuthorizationError(PRServiceError, PRAuthorizationRequiredError):
     """Raised when PR creation is attempted without authorization or in invalid state."""
 
 
@@ -77,16 +86,17 @@ class PullRequestService:
             raise ValueError(f"Job with id {job_id} not found.")
 
         # Enforcement gate
-        if job.status != JobStatus.OPENING_PR:
-            raise PRAuthorizationError(
-                f"Cannot create PR for Job {job_id} in state '{job.status.value}'. "
-                "Job must be in 'OPENING_PR' state."
-            )
+        try:
+            WorkflowAuthorizationPolicy.authorize_pr_creation(job)
+        except (
+            UnauthorizedActionError,
+            PlanApprovalRequiredError,
+            DuplicateActionError,
+            WorkflowAuthorizationError,
+        ) as exc:
+            raise PRAuthorizationError(str(exc)) from exc
 
-        if job.plan is None or job.plan.status != "approved":
-            raise PRAuthorizationError(
-                f"Cannot create PR for Job {job_id}: Plan has not been approved."
-            )
+        assert job.plan is not None
 
         title = f"fix({job.repo_name}): resolve #{job.issue_number}"
         body = self.build_pr_body(
@@ -119,13 +129,20 @@ class PullRequestService:
             or f"https://github.com/{job.repo_owner}/{job.repo_name}/pull/{pr.number}",
         )
         db.add(artifact)
+        if "artifacts" in job.__dict__ and job.artifacts is not None:
+            job.artifacts.append(artifact)
+        else:
+            job.artifacts = [artifact]
 
-        # Advance job to terminal COMPLETED state
-        job.status = JobStatus.COMPLETED
-        job.error_message = None
+        # Advance job to terminal COMPLETED state via state machine
+        JobStateMachine.transition(job, JobStatus.COMPLETED)
 
-        await db.commit()
-        await db.refresh(job)
+        try:
+            await db.commit()
+            await db.refresh(job)
+        except Exception:
+            await db.rollback()
+            raise
 
         logger.info("Successfully opened PR #%d for Job %d -> COMPLETED", pr.number, job.id)
         return pr

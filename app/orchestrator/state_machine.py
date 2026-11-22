@@ -10,11 +10,15 @@ from __future__ import annotations
 import logging
 
 from app.db.models import Job, JobStatus
+from app.services.workflow_auth import (
+    WorkflowAuthorizationError,
+    WorkflowAuthorizationPolicy,
+)
 
 logger = logging.getLogger(__name__)
 
 
-class InvalidTransitionError(Exception):
+class InvalidTransitionError(WorkflowAuthorizationError):
     """Raised when an illegal state transition is attempted on a Job."""
 
 
@@ -60,9 +64,12 @@ class JobStateMachine:
         job: Job,
         target_status: JobStatus,
         error_message: str | None = None,
+        *,
+        is_external: bool = False,
     ) -> None:
         """
-        Apply a transition to the Job entity or raise InvalidTransitionError.
+        Apply a transition to the Job entity or raise
+        InvalidTransitionError / WorkflowAuthorizationError.
 
         Parameters
         ----------
@@ -72,13 +79,21 @@ class JobStateMachine:
             Desired new status.
         error_message : str | None
             Required when target_status is FAILED. Cleared on non-FAILED transitions.
+        is_external : bool
+            True if triggered via external status PATCH request.
         """
         if not cls.can_transition(job.status, target_status):
             allowed = [s.value for s in VALID_JOB_TRANSITIONS.get(job.status, set())]
             raise InvalidTransitionError(
-                f"Cannot transition job {job.id} from '{job.status.value}' to "
-                f"'{target_status.value}'. Allowed next states: {allowed}"
+                f"Invalid state transition from '{job.status.value}' to '{target_status.value}'. "
+                f"Cannot transition job {job.id}. Allowed next states: {allowed}"
             )
+
+        if is_external:
+            WorkflowAuthorizationPolicy.authorize_external_status_update(job, target_status)
+
+        # Enforce workflow authorization gates on transitions
+        WorkflowAuthorizationPolicy.authorize_state_transition(job, target_status)
 
         job.status = target_status
         if target_status == JobStatus.FAILED:
