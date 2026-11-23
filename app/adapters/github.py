@@ -17,8 +17,8 @@ import logging
 import re
 from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
-from typing import Any
-from urllib.parse import parse_qs, urlparse
+from typing import Any, Protocol, runtime_checkable
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 from fastapi import Depends
@@ -194,6 +194,221 @@ class GitHubRepository(BaseModel):
     description: str | None = Field(default=None, description="Repository description.")
     default_branch: str = Field(default="main", description="Default branch name.")
     open_issues_count: int = Field(default=0, description="Total count of open issues.")
+    permissions: dict[str, bool] | None = Field(
+        default=None, description="Permissions for the authenticated user on this repository."
+    )
+
+
+_MAX_OWNER_LENGTH: int = 39
+_MAX_REPO_LENGTH: int = 100
+_RESERVED_NAMES: frozenset[str] = frozenset({".", ".."})
+
+# GitHub usernames/orgs: alphanumeric with single hyphens (no consecutive or
+# leading/trailing hyphens), 1-39 chars
+_OWNER_PATTERN = re.compile(r"^[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*$")
+# GitHub repository names: alphanumeric, hyphens, underscores, dots, 1-100 chars
+_REPO_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
+
+
+def validate_repo_params(owner: str, repo: str) -> None:
+    """
+    Validate repository owner and name parameters against GitHub specifications.
+
+    Rejects:
+    - Empty, whitespace, or non-string values.
+    - Exact '.' or '..' relative directory paths.
+    - Path traversal sequences (../, ..\\).
+    - URL-encoded characters (e.g. %2e, %2f, %00).
+    - Control characters and whitespace.
+    - Length exceeding GitHub limits (owner > 39 chars, repo > 100 chars).
+    - Malformed names not conforming to permitted character sets.
+    """
+    if not isinstance(owner, str) or not isinstance(repo, str):
+        raise GitHubValidationError("Repository owner and name must be strings")
+
+    # Reject leading/trailing whitespace or empty strings
+    if not owner or owner != owner.strip():
+        raise GitHubValidationError(
+            f"Invalid repository owner (empty or contains whitespace): {owner!r}"
+        )
+    if not repo or repo != repo.strip():
+        raise GitHubValidationError(
+            f"Invalid repository name (empty or contains whitespace): {repo!r}"
+        )
+
+    # Reject exact reserved directory references
+    if owner in _RESERVED_NAMES:
+        raise GitHubValidationError(
+            f"Repository owner cannot be reserved directory reference: {owner!r}"
+        )
+    if repo in _RESERVED_NAMES:
+        raise GitHubValidationError(
+            f"Repository name cannot be reserved directory reference: {repo!r}"
+        )
+
+    # Reject URL encoding attempts and control characters
+    if "%" in owner or unquote(owner) != owner or any(ord(c) < 32 or ord(c) == 127 for c in owner):
+        raise GitHubValidationError(
+            f"Repository owner contains invalid or encoded characters: {owner!r}"
+        )
+    if "%" in repo or unquote(repo) != repo or any(ord(c) < 32 or ord(c) == 127 for c in repo):
+        raise GitHubValidationError(
+            f"Repository name contains invalid or encoded characters: {repo!r}"
+        )
+
+    # Length constraints
+    if len(owner) > _MAX_OWNER_LENGTH:
+        raise GitHubValidationError(
+            f"Repository owner exceeds maximum length of {_MAX_OWNER_LENGTH} "
+            f"characters (got {len(owner)})"
+        )
+    if len(repo) > _MAX_REPO_LENGTH:
+        raise GitHubValidationError(
+            f"Repository name exceeds maximum length of {_MAX_REPO_LENGTH} "
+            f"characters (got {len(repo)})"
+        )
+
+    # Character set matching
+    if not _OWNER_PATTERN.match(owner):
+        raise GitHubValidationError(f"Repository owner does not match permitted pattern: {owner!r}")
+    if not _REPO_PATTERN.match(repo):
+        raise GitHubValidationError(f"Repository name does not match permitted pattern: {repo!r}")
+
+
+# =============================================================================
+# GitHub Client Protocol
+# =============================================================================
+
+
+@runtime_checkable
+class GitHubClientProtocol(Protocol):
+    """
+    Asynchronous protocol defining the contract for GitHub operations.
+    Enables pluggable implementations including Personal Access Token (PAT) REST clients,
+    GitHub App installation token clients, and deterministic in-memory mock clients.
+    """
+
+    async def start(self) -> None:
+        """Initialize the client session and underlying resources."""
+        ...
+
+    async def close(self) -> None:
+        """Release underlying resources and close the client session."""
+        ...
+
+    async def __aenter__(self) -> GitHubClientProtocol: ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None: ...
+
+    async def get_repository(self, owner: str, repo: str) -> GitHubRepository:
+        """Fetch repository metadata by owner and name."""
+        ...
+
+    async def list_authorized_repositories(
+        self,
+        *,
+        per_page: int = 30,
+        page: int = 1,
+    ) -> list[GitHubRepository]:
+        """
+        List repositories accessible to the authenticated credentials.
+
+        Authentication Provider Compatibility:
+        - Personal Access Token (PAT):
+          Queries 'GET /user/repos', returning all repositories the token user has
+          explicit read or write access to as a direct JSON list.
+        - GitHub App Installation Tokens (Future GitHubAppClient):
+          Must query 'GET /installation/repositories' (HTTP header:
+          'Authorization: Bearer <installation_access_token>'), which returns an
+          envelope: '{"total_count": int, "repositories": [...]}'. The client unwraps
+          the 'repositories' list and returns 'list[GitHubRepository]'.
+        Both implementations conform to this exact method signature and return type.
+        """
+        ...
+
+    async def verify_repository_access(self, owner: str, repo: str) -> bool:
+        """Verify whether credentials grant access to the specified repository."""
+        ...
+
+    async def get_issue(self, owner: str, repo: str, issue_number: int) -> GitHubIssue:
+        """Fetch an individual issue by repository and issue number."""
+        ...
+
+    async def get_issue_comments(
+        self,
+        owner: str,
+        repo: str,
+        issue_number: int,
+        *,
+        per_page: int = 30,
+        page: int = 1,
+    ) -> list[GitHubComment]:
+        """Fetch a single page of issue comments."""
+        ...
+
+    async def get_all_issue_comments(
+        self,
+        owner: str,
+        repo: str,
+        issue_number: int,
+        *,
+        per_page: int = 100,
+        max_comments: int | None = None,
+    ) -> list[GitHubComment]:
+        """Fetch all comments for an issue, following pagination safely."""
+        ...
+
+    async def list_repository_issues(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        state: str = "open",
+        per_page: int = 30,
+        page: int = 1,
+    ) -> list[GitHubIssue]:
+        """List issues for a repository, excluding pull requests."""
+        ...
+
+    async def get_branch(self, owner: str, repo: str, branch: str) -> GitHubBranch:
+        """Fetch branch metadata."""
+        ...
+
+    async def create_branch(
+        self,
+        owner: str,
+        repo: str,
+        new_branch: str,
+        from_sha: str,
+    ) -> dict[str, Any]:
+        """Create a new git reference / branch."""
+        ...
+
+    async def create_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str = "main",
+    ) -> GitHubPullRequest:
+        """Create a new pull request."""
+        ...
+
+    async def get_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        pull_number: int,
+    ) -> GitHubPullRequest:
+        """Fetch an existing pull request."""
+        ...
 
 
 # =============================================================================
@@ -296,6 +511,9 @@ class GitHubClient:
         exc_tb: Any,
     ) -> None:
         await self.close()
+
+    def __repr__(self) -> str:
+        return f"<GitHubClient base_url={self.base_url!r}>"
 
     async def _get_active_client(self) -> httpx.AsyncClient:
         """Return the active HTTP client, lazily initializing if required."""
@@ -448,6 +666,7 @@ class GitHubClient:
 
         Endpoint: GET /repos/{owner}/{repo}
         """
+        validate_repo_params(owner, repo)
         path = f"/repos/{owner}/{repo}"
         response = await self._request("GET", path)
 
@@ -459,12 +678,79 @@ class GitHubClient:
                 f"Invalid JSON response schema for repository '{owner}/{repo}'"
             ) from exc
 
+    async def list_authorized_repositories(
+        self,
+        *,
+        per_page: int = 30,
+        page: int = 1,
+    ) -> list[GitHubRepository]:
+        """
+        Enumerate repositories accessible to the configured authenticated credentials.
+        Uses GET /user/repos with pagination.
+
+        Parameters
+        ----------
+        per_page:
+            Number of repositories per page (1 to 100).
+        page:
+            Page number (1-based).
+        """
+        page_size = min(max(per_page, 1), 100)
+        page_num = max(page, 1)
+        path = "/user/repos"
+        params = {
+            "per_page": page_size,
+            "page": page_num,
+            "sort": "updated",
+            "direction": "desc",
+        }
+        response = await self._request("GET", path, params=params)
+
+        try:
+            raw_items = response.json()
+            if not isinstance(raw_items, list):
+                raise ValueError("Expected JSON array of repositories")
+            return [GitHubRepository.model_validate(item) for item in raw_items]
+        except (ValueError, ValidationError) as exc:
+            logger.error("Failed to parse GitHub repositories payload: %s", exc)
+            raise GitHubAPIResponseError(
+                "Invalid JSON response schema for authorized repositories"
+            ) from exc
+
+    async def verify_repository_access(self, owner: str, repo: str) -> bool:
+        """
+        Verify whether the configured credentials can access the specified repository.
+
+        Behavior:
+        - Returns True if credentials grant access and repository exists.
+        - Returns False if access is genuinely denied:
+          - Repository not found (HTTP 404)
+          - Insufficient permissions / Forbidden (HTTP 403 without rate limit)
+        - Re-raises on non-permission operational and security failures so that
+          the service boundary can distinguish temporary or configuration errors:
+          - GitHubAuthError (HTTP 401: bad/expired token)
+          - GitHubRateLimitError (HTTP 403 rate limit / 429)
+          - GitHubNetworkError (connection error, timeout)
+          - GitHubAPIResponseError (HTTP 5xx server errors, invalid schemas)
+          - GitHubValidationError (malformed owner/repo parameters)
+
+        Access is never granted on failure.
+        """
+        validate_repo_params(owner, repo)
+        try:
+            repo_data = await self.get_repository(owner, repo)
+            return repo_data is not None
+        except (GitHubResourceNotFoundError, GitHubPermissionError) as exc:
+            logger.info("Repository access denied for '%s/%s': %s", owner, repo, exc)
+            return False
+
     async def get_issue(self, owner: str, repo: str, issue_number: int) -> GitHubIssue:
         """
         Fetch a single repository issue by owner, repo, and issue number.
 
         Endpoint: GET /repos/{owner}/{repo}/issues/{issue_number}
         """
+        validate_repo_params(owner, repo)
         path = f"/repos/{owner}/{repo}/issues/{issue_number}"
         response = await self._request("GET", path)
 
@@ -490,6 +776,7 @@ class GitHubClient:
 
         Endpoint: GET /repos/{owner}/{repo}/issues/{issue_number}/comments
         """
+        validate_repo_params(owner, repo)
         path = f"/repos/{owner}/{repo}/issues/{issue_number}/comments"
         params = {"per_page": min(max(per_page, 1), 100), "page": max(page, 1)}
         response = await self._request("GET", path, params=params)
@@ -530,11 +817,16 @@ class GitHubClient:
         max_comments:
             Optional ceiling on total comments to retrieve. None retrieves all.
         """
+        validate_repo_params(owner, repo)
+        if max_comments is not None and max_comments <= 0:
+            return []
+
         all_comments: list[GitHubComment] = []
         page = 1
         page_size = min(max(per_page, 1), 100)
+        max_pages = 1000  # Guard against infinite pagination loops
 
-        while True:
+        while page <= max_pages:
             path = f"/repos/{owner}/{repo}/issues/{issue_number}/comments"
             params = {"per_page": page_size, "page": page}
             response = await self._request("GET", path, params=params)
@@ -579,12 +871,69 @@ class GitHubClient:
 
         return all_comments
 
+    async def list_repository_issues(
+        self,
+        owner: str,
+        repo: str,
+        *,
+        state: str = "open",
+        per_page: int = 30,
+        page: int = 1,
+    ) -> list[GitHubIssue]:
+        """
+        List issues for the specified repository with pagination.
+        Filters out pull requests (which GitHub's issue endpoint includes by default).
+
+        Parameters
+        ----------
+        owner:
+            Repository owner or organization name.
+        repo:
+            Repository name.
+        state:
+            Issue state filter: 'open', 'closed', or 'all'.
+        per_page:
+            Results per page (1 to 100).
+        page:
+            Page number (1-based).
+        """
+        validate_repo_params(owner, repo)
+        valid_states = {"open", "closed", "all"}
+        clean_state = state.lower() if state.lower() in valid_states else "open"
+        page_size = min(max(per_page, 1), 100)
+        page_num = max(page, 1)
+
+        path = f"/repos/{owner}/{repo}/issues"
+        params = {
+            "state": clean_state,
+            "per_page": page_size,
+            "page": page_num,
+        }
+        response = await self._request("GET", path, params=params)
+
+        try:
+            raw_items = response.json()
+            if not isinstance(raw_items, list):
+                raise ValueError("Expected JSON array of issues")
+
+            parsed_issues: list[GitHubIssue] = []
+            for item in raw_items:
+                if isinstance(item, dict) and "pull_request" not in item:
+                    parsed_issues.append(GitHubIssue.model_validate(item))
+            return parsed_issues
+        except (ValueError, ValidationError) as exc:
+            logger.error("Failed to parse GitHub repository issues payload: %s", exc)
+            raise GitHubAPIResponseError(
+                f"Invalid JSON response schema for issues on '{owner}/{repo}'"
+            ) from exc
+
     async def get_branch(self, owner: str, repo: str, branch: str) -> GitHubBranch:
         """
         Fetch branch information for a repository.
 
         Endpoint: GET /repos/{owner}/{repo}/branches/{branch}
         """
+        validate_repo_params(owner, repo)
         path = f"/repos/{owner}/{repo}/branches/{branch}"
         response = await self._request("GET", path)
         try:
@@ -602,6 +951,7 @@ class GitHubClient:
 
         Endpoint: POST /repos/{owner}/{repo}/git/refs
         """
+        validate_repo_params(owner, repo)
         path = f"/repos/{owner}/{repo}/git/refs"
         payload = {"ref": f"refs/heads/{new_branch}", "sha": from_sha}
         response = await self._request("POST", path, json_data=payload)
@@ -624,6 +974,7 @@ class GitHubClient:
 
         Endpoint: POST /repos/{owner}/{repo}/pulls
         """
+        validate_repo_params(owner, repo)
         path = f"/repos/{owner}/{repo}/pulls"
         payload = {
             "title": title,
@@ -645,6 +996,7 @@ class GitHubClient:
 
         Endpoint: GET /repos/{owner}/{repo}/pulls/{pull_number}
         """
+        validate_repo_params(owner, repo)
         path = f"/repos/{owner}/{repo}/pulls/{pull_number}"
         response = await self._request("GET", path)
         try:

@@ -13,6 +13,7 @@ from app.adapters.github import (
     GitHubAuthError,
     GitHubBranch,
     GitHubClient,
+    GitHubClientProtocol,
     GitHubComment,
     GitHubIssue,
     GitHubLabel,
@@ -25,6 +26,7 @@ from app.adapters.github import (
     GitHubUser,
     GitHubValidationError,
     get_github_client,
+    validate_repo_params,
 )
 from app.adapters.llm import (
     BaseLLMClient,
@@ -44,6 +46,7 @@ __all__ = [
     "GitHubAuthError",
     "GitHubBranch",
     "GitHubClient",
+    "GitHubClientProtocol",
     "GitHubComment",
     "GitHubIssue",
     "GitHubLabel",
@@ -55,6 +58,7 @@ __all__ = [
     "GitHubResourceNotFoundError",
     "GitHubUser",
     "GitHubValidationError",
+    "validate_repo_params",
     "LLMAdapterError",
     "LLMAuthError",
     "LLMResponseError",

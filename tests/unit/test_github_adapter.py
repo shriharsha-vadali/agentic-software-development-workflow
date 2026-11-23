@@ -16,6 +16,7 @@ Test categories:
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime
 from typing import Any
 
@@ -27,6 +28,7 @@ from app.adapters.github import (
     GitHubAPIResponseError,
     GitHubAuthError,
     GitHubClient,
+    GitHubClientProtocol,
     GitHubComment,
     GitHubIssue,
     GitHubNetworkError,
@@ -36,8 +38,10 @@ from app.adapters.github import (
     GitHubResourceNotFoundError,
     GitHubValidationError,
     get_github_client,
+    validate_repo_params,
 )
 from app.core.config import Settings
+from tests.mocks.mock_github import MockGitHubClient
 
 # =============================================================================
 # Mock Payloads & Helpers
@@ -422,6 +426,17 @@ class TestGetComments:
         assert len(comments) == 1
         assert comments[0].id == 101
 
+    async def test_get_all_issue_comments_zero_max_comments_returns_empty(self) -> None:
+        """max_comments <= 0 returns empty list without issuing HTTP requests."""
+        client = GitHubClient(token="ghp_test")
+        comments = await client.get_all_issue_comments("octocat", "Hello-World", 42, max_comments=0)
+        assert comments == []
+
+        negative_comments = await client.get_all_issue_comments(
+            "octocat", "Hello-World", 42, max_comments=-5
+        )
+        assert negative_comments == []
+
 
 # =============================================================================
 # Test: Error Handling & Status Codes
@@ -698,3 +713,418 @@ class TestBranchesAndPRs:
 
             pr_fetched = await client.get_pull_request("octocat", "Hello-World", 99)
             assert pr_fetched.id == 1001
+
+
+# =============================================================================
+# Milestone 1: Multi-Repository, Protocol & Discovery Tests
+# =============================================================================
+
+
+class TestGitHubClientProtocol:
+    """Verify runtime protocol conformance, static typing, and exact signature parity."""
+
+    def test_github_client_implements_protocol(self) -> None:
+        client = GitHubClient(token="ghp_test")
+        assert isinstance(client, GitHubClientProtocol)
+
+    def test_mock_github_client_implements_protocol(self) -> None:
+        mock = MockGitHubClient()
+        assert isinstance(mock, GitHubClientProtocol)
+
+    def test_static_protocol_conformance(self) -> None:
+        """Verify static type compatibility with GitHubClientProtocol."""
+        client: GitHubClientProtocol = GitHubClient(token="ghp_test")
+        mock: GitHubClientProtocol = MockGitHubClient()
+        assert client is not None
+        assert mock is not None
+
+    def test_protocol_signature_parity_client_and_mock(self) -> None:
+        """
+        Verify that every method declared in GitHubClientProtocol exists on both
+        GitHubClient and MockGitHubClient with identical parameter names, kinds,
+        defaults, and coroutine qualifiers.
+        """
+        protocol_members = {
+            name: getattr(GitHubClientProtocol, name)
+            for name in dir(GitHubClientProtocol)
+            if not name.startswith("_") or name in ("__aenter__", "__aexit__")
+        }
+
+        # Expected 15 protocol methods:
+        # __aenter__, __aexit__, start, close,
+        # get_repository, list_authorized_repositories, verify_repository_access,
+        # get_issue, get_issue_comments, get_all_issue_comments, list_repository_issues,
+        # get_branch, create_branch, create_pull_request, get_pull_request
+        assert len(protocol_members) == 15, (
+            f"Unexpected protocol member count: {len(protocol_members)}"
+        )
+
+        for cls in (GitHubClient, MockGitHubClient):
+            for name, proto_member in protocol_members.items():
+                assert hasattr(cls, name), f"{cls.__name__} is missing protocol method {name!r}"
+                cls_member = getattr(cls, name)
+
+                # Check coroutine parity
+                assert inspect.iscoroutinefunction(proto_member) == inspect.iscoroutinefunction(
+                    cls_member
+                ), f"{cls.__name__}.{name} coroutine qualifier mismatch"
+
+                proto_sig = inspect.signature(proto_member)
+                cls_sig = inspect.signature(cls_member)
+
+                proto_params = list(proto_sig.parameters.items())
+                cls_params = list(cls_sig.parameters.items())
+
+                assert len(proto_params) == len(cls_params), (
+                    f"{cls.__name__}.{name} param count: "
+                    f"expected {len(proto_params)}, got {len(cls_params)}"
+                )
+
+                for (p_name, p_param), (c_name, c_param) in zip(
+                    proto_params, cls_params, strict=True
+                ):
+                    assert p_name == c_name, (
+                        f"{cls.__name__}.{name} parameter name mismatch: "
+                        f"expected {p_name}, got {c_name}"
+                    )
+                    assert p_param.kind == c_param.kind, (
+                        f"{cls.__name__}.{name} parameter {p_name} kind mismatch"
+                    )
+                    assert p_param.default == c_param.default, (
+                        f"{cls.__name__}.{name} parameter {p_name} default mismatch"
+                    )
+
+
+class TestRepositoryDiscovery:
+    """Verify listing authorized repositories."""
+
+    async def test_list_authorized_repositories_success(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/user/repos"
+            assert request.url.params["per_page"] == "30"
+            assert request.url.params["page"] == "1"
+            return httpx.Response(
+                200,
+                json=[
+                    MOCK_REPO_PAYLOAD,
+                    {
+                        "id": 8888,
+                        "name": "Another-Repo",
+                        "full_name": "octocat/Another-Repo",
+                        "private": True,
+                        "owner": {
+                            "login": "octocat",
+                            "id": 1,
+                            "html_url": "https://github.com/octocat",
+                        },
+                        "html_url": "https://github.com/octocat/Another-Repo",
+                        "description": "Private repository",
+                        "default_branch": "main",
+                        "open_issues_count": 0,
+                        "permissions": {"admin": True, "push": True, "pull": True},
+                    },
+                ],
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as mock_http:
+            client = GitHubClient(token="ghp_test", http_client=mock_http)
+            repos = await client.list_authorized_repositories()
+
+        assert len(repos) == 2
+        assert repos[0].name == "Hello-World"
+        assert repos[1].name == "Another-Repo"
+        assert repos[1].private is True
+        assert repos[1].permissions == {"admin": True, "push": True, "pull": True}
+
+    async def test_list_authorized_repositories_pagination(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/user/repos"
+            assert request.url.params["per_page"] == "10"
+            assert request.url.params["page"] == "2"
+            return httpx.Response(200, json=[MOCK_REPO_PAYLOAD])
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as mock_http:
+            client = GitHubClient(token="ghp_test", http_client=mock_http)
+            repos = await client.list_authorized_repositories(per_page=10, page=2)
+
+        assert len(repos) == 1
+        assert repos[0].id == 1296269
+
+
+class TestRepositoryAccessVerification:
+    """Verify repository access checking and fail-closed behaviors."""
+
+    async def test_verify_repository_access_success(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/repos/octocat/Hello-World"
+            return httpx.Response(200, json=MOCK_REPO_PAYLOAD)
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as mock_http:
+            client = GitHubClient(token="ghp_test", http_client=mock_http)
+            has_access = await client.verify_repository_access("octocat", "Hello-World")
+
+        assert has_access is True
+
+    async def test_verify_repository_access_not_found(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"message": "Not Found"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as mock_http:
+            client = GitHubClient(token="ghp_test", http_client=mock_http)
+            has_access = await client.verify_repository_access("octocat", "Nonexistent-Repo")
+
+        assert has_access is False
+
+    async def test_verify_repository_access_forbidden(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(403, json={"message": "Must have push access"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as mock_http:
+            client = GitHubClient(token="ghp_test", http_client=mock_http)
+            has_access = await client.verify_repository_access("octocat", "Secret-Repo")
+
+        assert has_access is False
+
+    async def test_verify_repository_access_unauthorized_raises(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"message": "Bad credentials"})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as mock_http:
+            client = GitHubClient(token="ghp_invalid", http_client=mock_http)
+            with pytest.raises(GitHubAuthError):
+                await client.verify_repository_access("octocat", "Hello-World")
+
+    async def test_verify_repository_access_rate_limited_raises(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                429,
+                json={"message": "Too Many Requests"},
+                headers={"retry-after": "60"},
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as mock_http:
+            client = GitHubClient(token="ghp_test", http_client=mock_http)
+            with pytest.raises(GitHubRateLimitError):
+                await client.verify_repository_access("octocat", "Hello-World")
+
+    async def test_verify_repository_access_network_error_raises(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("Failed to resolve host api.github.com")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as mock_http:
+            client = GitHubClient(token="ghp_test", http_client=mock_http)
+            with pytest.raises(GitHubNetworkError):
+                await client.verify_repository_access("octocat", "Hello-World")
+
+    async def test_verify_repository_access_server_error_raises(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(500, text="Internal Server Error")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as mock_http:
+            client = GitHubClient(token="ghp_test", http_client=mock_http)
+            with pytest.raises(GitHubAPIResponseError):
+                await client.verify_repository_access("octocat", "Hello-World")
+
+    async def test_verify_repository_access_invalid_params_raises(self) -> None:
+        client = GitHubClient(token="ghp_test")
+        with pytest.raises(GitHubValidationError):
+            await client.verify_repository_access("../etc", "passwd")
+
+
+class TestRepositoryIssueDiscovery:
+    """Verify issue enumeration and PR filtering."""
+
+    async def test_list_repository_issues_filters_out_pull_requests(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/repos/octocat/Hello-World/issues"
+            assert request.url.params["state"] == "open"
+            return httpx.Response(
+                200,
+                json=[
+                    MOCK_ISSUE_PAYLOAD,  # Normal issue (pull_request is None)
+                    {
+                        "id": 9999,
+                        "number": 50,
+                        "title": "PR that GitHub includes in issues",
+                        "state": "open",
+                        "user": {"login": "contributor", "id": 10},
+                        "html_url": "https://github.com/octocat/Hello-World/pull/50",
+                        "pull_request": {
+                            "url": "https://api.github.com/repos/octocat/Hello-World/pulls/50"
+                        },
+                        "created_at": "2026-11-10T14:00:00Z",
+                        "updated_at": "2026-11-10T14:00:00Z",
+                    },
+                ],
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as mock_http:
+            client = GitHubClient(token="ghp_test", http_client=mock_http)
+            issues = await client.list_repository_issues("octocat", "Hello-World")
+
+        assert len(issues) == 1
+        assert issues[0].number == 42
+        assert issues[0].title == "Found a bug in worker loop"
+
+    async def test_list_repository_issues_state_filtering_and_pagination(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/repos/octocat/Hello-World/issues"
+            assert request.url.params["state"] == "closed"
+            assert request.url.params["per_page"] == "15"
+            assert request.url.params["page"] == "3"
+            return httpx.Response(200, json=[])
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as mock_http:
+            client = GitHubClient(token="ghp_test", http_client=mock_http)
+            issues = await client.list_repository_issues(
+                "octocat", "Hello-World", state="closed", per_page=15, page=3
+            )
+
+        assert issues == []
+
+
+class TestParameterValidation:
+    """Verify validation of owner and repository parameters."""
+
+    def test_valid_names_pass(self) -> None:
+        validate_repo_params("octocat", "Hello-World")
+        validate_repo_params("my-org-123", "service.api_core")
+        validate_repo_params("valid-user", "repo-with-dashes-and_underscores.v1")
+
+    @pytest.mark.parametrize(
+        ("owner", "repo"),
+        [
+            ("", "valid-repo"),
+            ("valid-owner", ""),
+            ("  ", "valid-repo"),
+            ("valid-owner", "  "),
+            (".", "valid-repo"),
+            ("valid-owner", "."),
+            ("..", "valid-repo"),
+            ("valid-owner", ".."),
+            ("../evil", "valid-repo"),
+            ("valid-owner", "../../etc/passwd"),
+            ("%2e%2e", "valid-repo"),
+            ("valid-owner", "%2f"),
+            ("valid-owner", "%00"),
+            ("a" * 40, "valid-repo"),  # Exceeds max 39 chars
+            ("valid-owner", "b" * 101),  # Exceeds max 100 chars
+            ("owner with spaces", "valid-repo"),
+            ("valid-owner", "repo with spaces"),
+            ("owner\nnewline", "valid-repo"),
+            ("valid-owner", "repo;injection"),
+            ("octo--cat", "valid-repo"),  # Consecutive hyphens in owner
+            ("octocat-", "valid-repo"),  # Trailing hyphen in owner
+            ("-octocat", "valid-repo"),  # Leading hyphen in owner
+            ("owner_with_underscore", "valid-repo"),  # Underscore invalid in GitHub username
+            ("owner.with.dot", "valid-repo"),  # Dot invalid in GitHub username
+        ],
+    )
+    def test_invalid_names_raise_validation_error(self, owner: str, repo: str) -> None:
+        with pytest.raises(GitHubValidationError):
+            validate_repo_params(owner, repo)
+
+
+class TestMockGitHubClient:
+    """Verify in-memory MockGitHubClient behavior and error injection."""
+
+    async def test_mock_multi_repository_and_issues(self) -> None:
+        mock = MockGitHubClient()
+        mock.add_repository("octocat", "Repo-A", private=False)
+        mock.add_repository("octocat", "Repo-B", private=True)
+
+        mock.add_issue("octocat", "Repo-A", "Issue 1 in A", body="Body 1")
+        mock.add_issue("octocat", "Repo-A", "Issue 2 in A", is_pull_request=True)
+        mock.add_issue("octocat", "Repo-B", "Issue 1 in B")
+
+        # Verify access
+        assert await mock.verify_repository_access("octocat", "Repo-A") is True
+        assert await mock.verify_repository_access("octocat", "Repo-B") is True
+        assert await mock.verify_repository_access("octocat", "Nonexistent") is False
+
+        # List authorized repositories
+        repos = await mock.list_authorized_repositories()
+        assert len(repos) == 2
+
+        # List repository issues (excludes PRs)
+        issues_a = await mock.list_repository_issues("octocat", "Repo-A")
+        assert len(issues_a) == 1
+        assert issues_a[0].title == "Issue 1 in A"
+
+    async def test_mock_error_simulations(self) -> None:
+        mock = MockGitHubClient()
+        mock.add_repository("octocat", "Repo-A")
+
+        # Simulate auth failure raises
+        mock.simulate_auth_error = True
+        with pytest.raises(GitHubAuthError):
+            await mock.get_repository("octocat", "Repo-A")
+        with pytest.raises(GitHubAuthError):
+            await mock.verify_repository_access("octocat", "Repo-A")
+        mock.simulate_auth_error = False
+
+        # Simulate rate limit raises
+        mock.simulate_rate_limit = True
+        with pytest.raises(GitHubRateLimitError):
+            await mock.get_repository("octocat", "Repo-A")
+        with pytest.raises(GitHubRateLimitError):
+            await mock.verify_repository_access("octocat", "Repo-A")
+        mock.simulate_rate_limit = False
+
+        # Simulate network error raises
+        mock.simulate_network_error = True
+        with pytest.raises(GitHubNetworkError):
+            await mock.get_repository("octocat", "Repo-A")
+        with pytest.raises(GitHubNetworkError):
+            await mock.verify_repository_access("octocat", "Repo-A")
+        mock.simulate_network_error = False
+
+        # Forbidden repo returns False (genuine permission failure)
+        mock.forbidden_repositories.add("octocat/repo-a")
+        with pytest.raises(GitHubPermissionError):
+            await mock.get_repository("octocat", "Repo-A")
+        assert await mock.verify_repository_access("octocat", "Repo-A") is False
+
+    async def test_mock_branches_and_pull_requests(self) -> None:
+        mock = MockGitHubClient()
+        mock.add_repository("octocat", "Repo-A", default_branch="main")
+
+        # Default branch exists
+        branch = await mock.get_branch("octocat", "Repo-A", "main")
+        assert branch.name == "main"
+
+        # Create branch
+        await mock.create_branch("octocat", "Repo-A", "feature-x", "abc123sha")
+        feat_branch = await mock.get_branch("octocat", "Repo-A", "feature-x")
+        assert feat_branch.sha == "abc123sha"
+
+        # Create PR
+        pr = await mock.create_pull_request(
+            "octocat", "Repo-A", "Title", "Body", "feature-x", "main"
+        )
+        assert pr.number == 1
+
+        # Fetch PR
+        fetched_pr = await mock.get_pull_request("octocat", "Repo-A", 1)
+        assert fetched_pr.number == 1
+        assert fetched_pr.head_branch == "feature-x"
+
+    async def test_mock_get_all_issue_comments_limits(self) -> None:
+        mock = MockGitHubClient()
+        mock.add_repository("octocat", "Repo-A")
+        mock.add_issue("octocat", "Repo-A", "Issue 1", issue_number=1)
+        mock.add_comment("octocat", "Repo-A", 1, "Comment 1")
+        mock.add_comment("octocat", "Repo-A", 1, "Comment 2")
+        mock.add_comment("octocat", "Repo-A", 1, "Comment 3")
+
+        # Zero or negative max_comments returns empty list
+        assert await mock.get_all_issue_comments("octocat", "Repo-A", 1, max_comments=0) == []
+        assert await mock.get_all_issue_comments("octocat", "Repo-A", 1, max_comments=-1) == []
+
+        # Capped max_comments
+        comments = await mock.get_all_issue_comments("octocat", "Repo-A", 1, max_comments=2)
+        assert len(comments) == 2
+
+        # All comments
+        all_c = await mock.get_all_issue_comments("octocat", "Repo-A", 1)
+        assert len(all_c) == 3
